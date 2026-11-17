@@ -36,6 +36,11 @@ PR 里请说明：动机（解决什么问题）、改动范围、你做过的�
 - 主题色使用 `theme/app_colors.dart` 的语义化令牌（ThemeExtension），不写死颜色
 - UI 文案中文，代码标识符英文
 
+## 特别欢迎：iOS
+
+`ios/` 工程文件已就位，但维护者目前只在 Android / Windows 构建发版，**iOS 从未经过构建验证**。
+有 Mac 环境的欢迎提 PR：构建验证、签名配置说明、Xcode 工程适配、Bug 修复都非常有价值。
+
 ## SDK 版本
 
 SDK（`openhongguo`）是 git 依赖，指向维护者的 fork，`ref` 锁定 commit。
