@@ -186,6 +186,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// [_swipeDirection] 1 = 下一集（从底部进入），-1 = 上一集（从顶部进入）。
   double _swipeDy = 0;
   int _swipeDirection = 0;
+  int _swipeToken = 0;
   late final AnimationController _swipeController;
   Animation<double>? _swipeAnimation;
 
@@ -1092,7 +1093,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       CurvedAnimation(parent: _swipeController, curve: Curves.easeOutCubic),
     );
     _swipeController.duration = duration;
-    _swipeController.forward(from: 0).whenComplete(() {
+    // stop() 会取消 ticker；用 whenCompleteOrCancel 保证 Future 一定落地，
+    // 否则快速二次滑动会让上一次 _commitSwipe 永久挂起。
+    final TickerFuture ticker = _swipeController.forward(from: 0);
+    ticker.whenCompleteOrCancel(() {
       _swipeAnimation = null;
       if (!done.isCompleted) {
         done.complete();
@@ -1105,6 +1109,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (!_isMobilePlatform || _isWideLayout) {
       return;
     }
+    // 作废上一次未完成的提交/回弹，避免旧动画在松手后继续改集号。
+    _swipeToken++;
     _swipeController.stop();
   }
 
@@ -1138,9 +1144,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       height: height,
     );
     if (direction == 0) {
+      final int token = ++_swipeToken;
       unawaited(
         _animateSwipe(0, duration: const Duration(milliseconds: 220)).then((_) {
-          if (mounted) {
+          if (mounted && token == _swipeToken) {
             setState(() => _swipeDirection = 0);
           }
         }),
@@ -1151,9 +1158,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   }
 
   Future<void> _commitSwipe(int direction) async {
+    final int token = ++_swipeToken;
     final double height = MediaQuery.sizeOf(context).height;
     await _animateSwipe(-direction * height);
-    if (!mounted) {
+    if (!mounted || token != _swipeToken) {
       return;
     }
     if (direction > 0) {
@@ -1173,22 +1181,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _swipeDy = 0;
       _swipeDirection = 0;
     });
-  }
-
-  Widget _buildSwipePreview() {
-    final VideoController? controller = _preloadController;
-    if (controller != null && _preloadEpisode == _episode + 1) {
-      return IgnorePointer(
-        child: Center(
-          child: Video(
-            controller: controller,
-            controls: NoVideoControls,
-            fit: BoxFit.contain,
-          ),
-        ),
-      );
-    }
-    return PosterArtwork(drama: _activeDrama, variant: PosterVariant.full);
   }
 
   EpisodeInfo? _episodeByNumber(int number) {
@@ -1267,6 +1259,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       await player.open(Media(chosen.url));
       await player.pause();
       await player.setVolume(0);
+      // open 期间用户可能已经切集/进全屏，最终复核后再公布预加载结果。
+      if (!mounted ||
+          !_isMobilePlatform ||
+          _isWideLayout ||
+          _episode != next - 1) {
+        return;
+      }
       _disposePreload();
       _preloadPlayer = player;
       _preloadController = controller;
@@ -1525,6 +1524,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         MediaQuery.orientationOf(context) == Orientation.landscape;
     // 移动端竖屏：底部只留进度 + 全屏，传输按钮交给点按/滑动。
     final bool compactControls = !isWide && _isMobilePlatform;
+    final double screenHeight = MediaQuery.sizeOf(context).height;
 
     return CallbackShortcuts(
       bindings: _shortcutBindings,
@@ -1587,15 +1587,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                 onHorizontalDragEnd: (_) => _endScrub(),
                 onHorizontalDragCancel: _endScrub,
                 // 移动端竖屏：上下滑跟手切集；全屏/桌面仍走原有手势。
-                onVerticalDragStart: _onVerticalDragStart,
-                onVerticalDragUpdate: _onVerticalDragUpdate,
-                onVerticalDragEnd: _onVerticalDragEnd,
-                onVerticalDragCancel: () {
-                  if (!_isMobilePlatform || _isWideLayout) {
-                    return;
-                  }
-                  unawaited(_animateSwipe(0));
-                },
+                // 不在这些平台注册竖向识别器，避免抢走长按 2x。
+                onVerticalDragStart: compactControls
+                    ? _onVerticalDragStart
+                    : null,
+                onVerticalDragUpdate: compactControls
+                    ? _onVerticalDragUpdate
+                    : null,
+                onVerticalDragEnd: compactControls ? _onVerticalDragEnd : null,
+                onVerticalDragCancel: !compactControls
+                    ? null
+                    : () {
+                        _swipeToken++;
+                        unawaited(_animateSwipe(0));
+                      },
                 child: Listener(
                   behavior: HitTestBehavior.translucent,
                   // 桌面滚轮上下切集（与触摸上/下滑同语义：下滚 = 下一集）。
@@ -1700,17 +1705,47 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                           ),
                         ),
                       ),
-                      // 相邻集预览：上滑从底部进入，下滑从顶部进入。
-                      if (_swipeDirection != 0 && !isWide)
+                      // 下一集固定槽位：空闲停在屏幕下方，提前创建 Surface；
+                      // 上滑跟手进入。下滑方向停到屏幕外更下方，绝不能把
+                      // 下一集画面当成上一集预览。
+                      if (_preloadController != null && !isWide)
                         Positioned.fill(
                           child: Transform.translate(
                             offset: Offset(
                               0,
-                              _swipeDirection *
-                                      MediaQuery.sizeOf(context).height +
-                                  _swipeDy,
+                              shouldUsePreloadPreview(
+                                    swipeDirection: _swipeDirection,
+                                    preloadEpisode: _preloadEpisode,
+                                    currentEpisode: _episode,
+                                    hasController: true,
+                                  )
+                                  ? (_swipeDirection == 0
+                                            ? 1
+                                            : _swipeDirection) *
+                                        screenHeight +
+                                        _swipeDy
+                                  : screenHeight * 2,
                             ),
-                            child: _buildSwipePreview(),
+                            child: IgnorePointer(
+                              child: Center(
+                                child: Video(
+                                  controller: _preloadController!,
+                                  controls: NoVideoControls,
+                                  fit: BoxFit.contain,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      // 下滑（上一集）没有预加载，用封面从顶部进入。
+                      if (_swipeDirection < 0 && !isWide)
+                        Positioned.fill(
+                          child: Transform.translate(
+                            offset: Offset(0, -screenHeight + _swipeDy),
+                            child: PosterArtwork(
+                              drama: _activeDrama,
+                              variant: PosterVariant.full,
+                            ),
                           ),
                         ),
                       if (_loading) const _CenteredStatus(loading: true),
@@ -2121,6 +2156,23 @@ bool isPlayerSheetZone(double x, double width) {
 
 const double _swipeCommitFraction = 0.28;
 const double _swipeCommitVelocity = 800;
+
+/// 预加载画面只用于「下一集」和上滑/空闲方向；下滑必须回到封面。
+@visibleForTesting
+bool shouldUsePreloadPreview({
+  required int swipeDirection,
+  required int? preloadEpisode,
+  required int currentEpisode,
+  required bool hasController,
+}) {
+  if (!hasController || preloadEpisode == null) {
+    return false;
+  }
+  if (preloadEpisode != currentEpisode + 1) {
+    return false;
+  }
+  return swipeDirection >= 0;
+}
 
 /// 下一集预加载目标；最后一集或不合法输入返回 0。
 @visibleForTesting

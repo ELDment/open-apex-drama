@@ -765,6 +765,54 @@ void main() {
     expect(isPlayerSheetZone(290, 300), isFalse);
   });
 
+  test('preload preview only applies to the next episode and upward swipe', () {
+    expect(
+      shouldUsePreloadPreview(
+        swipeDirection: 1,
+        preloadEpisode: 2,
+        currentEpisode: 1,
+        hasController: true,
+      ),
+      isTrue,
+    );
+    expect(
+      shouldUsePreloadPreview(
+        swipeDirection: 0,
+        preloadEpisode: 2,
+        currentEpisode: 1,
+        hasController: true,
+      ),
+      isTrue,
+    );
+    expect(
+      shouldUsePreloadPreview(
+        swipeDirection: -1,
+        preloadEpisode: 2,
+        currentEpisode: 1,
+        hasController: true,
+      ),
+      isFalse,
+    );
+    expect(
+      shouldUsePreloadPreview(
+        swipeDirection: 1,
+        preloadEpisode: 3,
+        currentEpisode: 1,
+        hasController: true,
+      ),
+      isFalse,
+    );
+    expect(
+      shouldUsePreloadPreview(
+        swipeDirection: 1,
+        preloadEpisode: 2,
+        currentEpisode: 1,
+        hasController: false,
+      ),
+      isFalse,
+    );
+  });
+
   test('next preload episode respects the last episode', () {
     expect(nextPreloadEpisode(1, 3), 2);
     expect(nextPreloadEpisode(2, 3), 3);
@@ -807,6 +855,25 @@ void main() {
 
     await tester.drag(find.byType(PlayerScreen), const Offset(0, -400));
     await tester.pump(const Duration(milliseconds: 320));
+    await tester.pumpAndSettle();
+
+    expect(find.text('第2集'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('player survives a second drag during the swipe animation', (
+    WidgetTester tester,
+  ) async {
+    await pumpScreen(
+      tester,
+      PlayerScreen(drama: mockHero),
+      size: const Size(390, 844),
+    );
+
+    await tester.drag(find.byType(PlayerScreen), const Offset(0, -400));
+    await tester.pump(const Duration(milliseconds: 40));
+    await tester.drag(find.byType(PlayerScreen), const Offset(0, -400));
+    await tester.pump(const Duration(milliseconds: 400));
     await tester.pumpAndSettle();
 
     expect(find.text('第2集'), findsOneWidget);
