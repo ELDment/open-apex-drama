@@ -29,7 +29,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   static const List<String> _tabs = <String>['推荐', '漫剧', '短剧', '电影'];
 
   int _tabIndex = 0;
-  int _shuffle = 0;
+
+  /// 当前频道的分页游标；空串表示第一页。
+  String _cursor = '';
+
+  /// 本地轮转次数：仅在服务端没有下一页（单页频道 / 降级数据）时使用。
+  int _rotation = 0;
   int _bannerIndex = 0;
   late final PageController _bannerController = PageController();
 
@@ -41,14 +46,35 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   /// 当前频道数据（含 mock 降级标记）。
   AsyncValue<HomeFeed> get _feedAsync =>
-      ref.watch(homeFeedProvider(_tabs[_tabIndex]));
+      ref.watch(homeFeedProvider(HomeFeedKey(_tabs[_tabIndex], _cursor)));
 
+  /// 兜底轮转：服务端已无下一页时至少让「换一换」有可见反馈。
   List<Drama> _rotated(List<Drama> base) {
-    if (_tabIndex != 0 || _shuffle == 0 || base.isEmpty) {
+    if (_rotation == 0 || base.length < 2) {
       return base;
     }
-    final int offset = (_shuffle * 3) % base.length;
+    final int offset = _rotation % base.length;
     return <Drama>[...base.sublist(offset), ...base.sublist(0, offset)];
+  }
+
+  /// 「换一换」：优先取服务端的下一页内容，没有下一页才退回本地轮转。
+  void _shuffleFeed() {
+    final HomeFeed? feed = _feedAsync.value;
+    if (feed == null) {
+      return; // 上一页还没加载完，避免并发翻页。
+    }
+    final String next = feed.hasMore && feed.cursor.isNotEmpty
+        ? feed.cursor
+        : '';
+    if (next != _cursor) {
+      // 有下一页 → 换一批内容；已在最后一页 → 回到第一页重新开始。
+      setState(() {
+        _cursor = next;
+        _rotation = 0;
+      });
+      return;
+    }
+    setState(() => _rotation++);
   }
 
   void _onSearch() {
@@ -60,7 +86,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   void _retry() {
-    ref.invalidate(homeFeedProvider(_tabs[_tabIndex]));
+    ref.invalidate(homeFeedProvider(HomeFeedKey(_tabs[_tabIndex], _cursor)));
   }
 
   @override
@@ -71,8 +97,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final double cardWidth = (contentWidth - (columns - 1) * 11) / columns;
     final double itemExtent = cardWidth * 4 / 3 + 62;
     final AsyncValue<HomeFeed> feedAsync = _feedAsync;
-    final List<Drama> feed = feedAsync.value?.items ?? const <Drama>[];
-    final List<Drama> banners = _rotated(feed);
+    // 「换一换」轮转后的展示列表；推荐网格与轮播共用，否则桌面端点了没反应。
+    final List<Drama> feed = _rotated(
+      feedAsync.value?.items ?? const <Drama>[],
+    );
     final HomeFeed? feedValue = feedAsync.value;
 
     return AmbientGlow(
@@ -85,7 +113,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 padding: EdgeInsets.fromLTRB(horizontal, 6, horizontal - 8, 0),
                 child: _HomeTopBar(
                   selectedIndex: _tabIndex,
-                  onSelect: (int index) => setState(() => _tabIndex = index),
+                  onSelect: (int index) => setState(() {
+                    _tabIndex = index;
+                    // 换频道回到该频道第一页，避免沿用上一个频道的游标。
+                    _cursor = '';
+                    _rotation = 0;
+                  }),
                   onSearch: _onSearch,
                 ),
               ),
@@ -109,7 +142,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   child: _HeroCarousel(
                     controller: _bannerController,
                     activeIndex: _bannerIndex,
-                    banners: banners.take(3).toList(growable: false),
+                    banners: feed.take(3).toList(growable: false),
                     onPageChanged: (int index) =>
                         setState(() => _bannerIndex = index),
                   ),
@@ -122,7 +155,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   title: '为你推荐',
                   trailing: '换一换',
                   trailingIcon: Icons.refresh_rounded,
-                  onTrailingTap: () => setState(() => _shuffle++),
+                  onTrailingTap: _shuffleFeed,
                 ),
               ),
             ),

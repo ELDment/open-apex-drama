@@ -2,6 +2,22 @@ import 'package:flutter/material.dart';
 
 import 'drama.dart';
 
+/// 发现页（首页频道）的一页：条目 + 下一页游标。
+///
+/// [cursor] 为空表示没有下一页；调用方把它原样回传给仓库即可继续翻页。
+@immutable
+class DramaPage {
+  const DramaPage({
+    required this.items,
+    this.cursor = '',
+    this.hasMore = false,
+  });
+
+  final List<Drama> items;
+  final String cursor;
+  final bool hasMore;
+}
+
 /// 榜单页数据：顶部内容/榜单 Tab + 条目列表。
 @immutable
 class RankTab {

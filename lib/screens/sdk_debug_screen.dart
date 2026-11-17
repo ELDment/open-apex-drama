@@ -6,6 +6,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../data/remote/openhongguo_service.dart';
 import '../data/repository/repositories.dart';
+import '../models/catalog.dart';
 import '../models/drama.dart';
 import '../models/playback.dart';
 import '../player/video_output.dart';
@@ -81,8 +82,10 @@ class _SdkDebugScreenState extends ConsumerState<SdkDebugScreen> {
   // ---------- 数据动作（内部无互斥包装，供单步按钮与全链路复用） ----------
 
   Future<void> _doDiscover({String channel = '推荐'}) async {
-    final List<Drama> items =
-        await ref.read(catalogRepositoryProvider).discoverFeed(channel);
+    final DramaPage page = await ref
+        .read(catalogRepositoryProvider)
+        .discoverFeed(channel);
+    final List<Drama> items = page.items;
     _series = items;
     _selectedSeries = items.isNotEmpty ? items.first : null;
     _selectedEpisode = null;

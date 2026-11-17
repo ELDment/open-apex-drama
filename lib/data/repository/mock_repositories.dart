@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import '../../models/catalog.dart';
 import '../../models/danmaku_cue.dart';
 import '../../models/drama.dart';
@@ -9,13 +11,31 @@ import 'repositories.dart';
 
 /// mock 演示数据实现：离线兜底与测试用。
 class MockCatalogRepository implements CatalogRepository {
+  /// 演示分页的每页条数：让 12 部演示数据正好分成两页，
+  /// 首页与「换一换」都能观察到内容变化。
+  static const int _discoverPageSize = 6;
+
   @override
-  Future<List<Drama>> discoverFeed(String channelLabel) async {
+  Future<DramaPage> discoverFeed(
+    String channelLabel, {
+    String cursor = '',
+  }) async {
     await Future<void>.delayed(const Duration(milliseconds: 350));
-    if (channelLabel == '推荐') {
-      return mockDramas;
+    final List<Drama> all = channelLabel == '推荐'
+        ? mockDramas
+        : mockDramas.where((Drama d) => d.kind == channelLabel).toList();
+    // 游标就是下一页的起始下标；演示数据按固定页大小切分。
+    final int start = int.tryParse(cursor) ?? 0;
+    if (start >= all.length) {
+      return const DramaPage(items: <Drama>[]);
     }
-    return mockDramas.where((Drama d) => d.kind == channelLabel).toList();
+    final int end = math.min(start + _discoverPageSize, all.length);
+    final bool hasMore = end < all.length;
+    return DramaPage(
+      items: all.sublist(start, end),
+      cursor: hasMore ? '$end' : '',
+      hasMore: hasMore,
+    );
   }
 
   @override

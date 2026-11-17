@@ -12,9 +12,12 @@ import '../../models/series_detail.dart';
 
 /// 发现 / 搜索。
 abstract class CatalogRepository {
-  /// 首页频道流。[channelLabel] 为 UI 频道名（推荐/短剧/电影…），
+  /// 首页频道流的一页。[channelLabel] 为 UI 频道名（推荐/短剧/电影…），
   /// 无映射或映射失败的频道抛 [UnsupportedError] 由调用方降级。
-  Future<List<Drama>> discoverFeed(String channelLabel);
+  ///
+  /// 首次取第一页传空 [cursor]；「换一换」把上一页的 [DramaPage.cursor]
+  /// 原样传回即可拿到下一批内容，[DramaPage.hasMore] 为 false 表示已到底。
+  Future<DramaPage> discoverFeed(String channelLabel, {String cursor = ''});
 
   /// 关键词搜索的一页。第一页传空 [cursor]；[SearchPage.cursor] 为下一页游标，
   /// [SearchPage.hasMore] 为 false 时表示已到底。

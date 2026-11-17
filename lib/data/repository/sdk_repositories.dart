@@ -29,22 +29,31 @@ class SdkCatalogRepository implements CatalogRepository {
   }
 
   @override
-  Future<List<Drama>> discoverFeed(String channelLabel) {
+  Future<DramaPage> discoverFeed(String channelLabel, {String cursor = ''}) {
     final String? channel = kDiscoverChannels[channelLabel];
     if (channel == null) {
       throw UnsupportedError('频道「$channelLabel」暂未接入 SDK');
     }
-    return _guard<List<Drama>>((OpenhongguoClient client) async {
-      final PagedResult<SeriesSummary> page =
-          await client.discover(DiscoverOptions(channel: channel));
+    return _guard<DramaPage>((OpenhongguoClient client) async {
+      final PagedResult<SeriesSummary> page = await client.discover(
+        DiscoverOptions(
+          channel: channel,
+          cursor: cursor.isEmpty ? null : cursor,
+        ),
+      );
       debugPrint(
-        '[discover:$channelLabel] ${page.items.length} 部: '
+        '[discover:$channelLabel${cursor.isEmpty ? '' : ':cursor'}] '
+        '${page.items.length} 部: '
         '${page.items.take(5).map((SeriesSummary s) => s.title).join(' / ')}',
       );
-      return <Drama>[
-        for (final SeriesSummary item in page.items)
-          dramaFromSummary(item, kind: channelLabel),
-      ];
+      return DramaPage(
+        items: <Drama>[
+          for (final SeriesSummary item in page.items)
+            dramaFromSummary(item, kind: channelLabel),
+        ],
+        cursor: page.cursor,
+        hasMore: page.hasMore && page.cursor.isNotEmpty,
+      );
     });
   }
 

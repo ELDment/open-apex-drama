@@ -127,42 +127,93 @@ final newReleasesProvider = FutureProvider.family<List<Drama>, String>(
   },
 );
 
+/// 首页推荐流的缓存键：频道 + 分页游标。
+///
+/// 「换一换」改变游标即可让 [homeFeedProvider] 重新取下一页；family 需要
+/// 值相等语义，因此用不可变类而不是拼接字符串。
+@immutable
+class HomeFeedKey {
+  const HomeFeedKey(this.channelLabel, [this.cursor = '']);
+
+  final String channelLabel;
+
+  /// 空串表示第一页。
+  final String cursor;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is HomeFeedKey &&
+          other.channelLabel == channelLabel &&
+          other.cursor == cursor;
+
+  @override
+  int get hashCode => Object.hash(channelLabel, cursor);
+
+  @override
+  String toString() => 'HomeFeedKey($channelLabel, "$cursor")';
+}
+
 /// 首页频道数据；SDK 失败或频道未接入时降级 mock 并标记。
 @immutable
 class HomeFeed {
   const HomeFeed({
     required this.items,
+    this.cursor = '',
+    this.hasMore = false,
     this.isFallback = false,
     this.fallbackReason = '',
   });
 
   final List<Drama> items;
+
+  /// 下一页游标；空串表示没有下一页（真实数据或降级数据都一样）。
+  final String cursor;
+  final bool hasMore;
   final bool isFallback;
   final String fallbackReason;
 }
 
-final homeFeedProvider = FutureProvider.family<HomeFeed, String>(
-  (Ref ref, String channelLabel) async {
+final homeFeedProvider = FutureProvider.family<HomeFeed, HomeFeedKey>(
+  (Ref ref, HomeFeedKey key) async {
     final CatalogRepository repo = ref.watch(catalogRepositoryProvider);
     if (repo is MockCatalogRepository) {
-      return HomeFeed(items: await repo.discoverFeed(channelLabel));
+      return _toFeed(
+        await repo.discoverFeed(key.channelLabel, cursor: key.cursor),
+      );
     }
     try {
-      final List<Drama> items = await repo.discoverFeed(channelLabel);
-      if (items.isNotEmpty) {
-        return HomeFeed(items: items);
+      final DramaPage page = await repo.discoverFeed(
+        key.channelLabel,
+        cursor: key.cursor,
+      );
+      if (page.items.isNotEmpty) {
+        return _toFeed(page);
       }
-      return await _fallback(channelLabel, '该频道暂时没有内容');
+      return await _fallback(key.channelLabel, '该频道暂时没有内容');
     } on ApiException catch (error) {
-      return await _fallback(channelLabel, error.userMessage);
+      return await _fallback(key.channelLabel, error.userMessage);
     } on UnsupportedError {
-      return await _fallback(channelLabel, '该频道暂未接入真实数据');
+      return await _fallback(key.channelLabel, '该频道暂未接入真实数据');
     }
   },
 );
 
+HomeFeed _toFeed(DramaPage page) => HomeFeed(
+  items: page.items,
+  cursor: page.cursor,
+  hasMore: page.hasMore,
+);
+
+/// 降级到演示数据。只给第一页且标记无下一页：游标属于真实数据源，
+/// 拿它去请求演示数据没有意义；此时「换一换」退回本地轮转。
 Future<HomeFeed> _fallback(String channelLabel, String reason) async {
-  final List<Drama> items =
-      await MockCatalogRepository().discoverFeed(channelLabel);
-  return HomeFeed(items: items, isFallback: true, fallbackReason: reason);
+  final DramaPage page = await MockCatalogRepository().discoverFeed(
+    channelLabel,
+  );
+  return HomeFeed(
+    items: page.items,
+    isFallback: true,
+    fallbackReason: reason,
+  );
 }
