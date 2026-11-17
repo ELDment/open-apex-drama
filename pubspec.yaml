@@ -1,0 +1,53 @@
+name: apexduanju
+description: "ApexDrama：基于开源 SDK 的第三方短剧客户端（Android / Windows），非官方、免登录，仅供学习研究。"
+publish_to: 'none'
+
+# 版本号规则：buildNumber = major*100 + minor*10 + patch（1.4.0 -> 140）
+# 与已发布 Release 的版本保持连续；发版用 tool/bump_version.ps1 自增。
+version: 1.4.0+140
+
+environment:
+  sdk: ^3.13.7
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  # 水果平台短剧的非官方 SDK（Apache-2.0，上游项目见 README 致谢）。
+  # 通过 git 依赖引用自维护 fork；ref 锁定 commit，同步上游后手动更新 ref。
+  openhongguo:
+    git:
+      url: https://github.com/Sxuan-Coder/openhongguo.git
+      path: bindings/flutter
+      ref: ecbd85e
+  flutter_riverpod: ^3.4.3
+  media_kit: ^1.2.6
+  media_kit_video: ^2.0.1
+  media_kit_libs_android_video: ^1.3.8
+  shared_preferences: ^2.5.6
+  url_launcher: ^6.3.3
+  package_info_plus: ^10.2.2
+  media_kit_libs_windows_video: ^1.0.11
+  window_manager: ^0.5.1
+  path_provider: ^2.1.6
+  open_filex: ^5.0.0
+  # WebDAV 云同步（GET/PUT/MKCOL/PROPFIND 自定义方法 + 基础认证）。
+  http: ^1.6.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^6.0.0
+
+# For information on the generic Dart part of this file, see the
+# following page: https://dart.dev/tools/pub/pubspec
+
+# The following section is specific to Flutter packages.
+flutter:
+
+  uses-material-design: true
+
+  assets:
+    - assets/images/logo.png
