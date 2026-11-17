@@ -1,0 +1,201 @@
+# 推送 v*.*.* tag 后自动构建并发布到本仓库 Release。
+#
+# 约定详见根目录 AGENTS.md：
+#   - 代码、tag、构建与 Release 都在本仓库完成
+#   - 版本号来自 tag（v1.1.2 -> 1.1.2，构建号 112）
+#   - Release 标题固定 ApexDrama vx.y.z，正文取 updates.json 中该版本的 notes
+#
+# 需要的 secrets（Android 正式签名）：
+#   ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD /
+#   ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD
+# publish 使用仓库默认 GITHUB_TOKEN，需要 contents: write。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: '3.47.9'
+
+jobs:
+  android:
+    name: Build Android APKs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore release keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ]; then
+            echo "::error::缺少 Android 签名 Secrets（ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS），拒绝用临时签名发版"
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > android/apex-release.jks
+          {
+            echo "storeFile=$GITHUB_WORKSPACE/android/apex-release.jks"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > android/key.properties
+          echo "keystore restored"
+
+      - name: Resolve version from tag
+        id: v
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          if ! [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag 必须是 vx.y.z 形式，当前为 ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          IFS=. read -r major minor patch <<< "$tag"
+          name="$tag"
+          code=$((major * 100 + minor * 10 + patch))
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "版本 $name，构建号 $code"
+
+      - name: Sync pubspec version with tag
+        run: |
+          sed -i -E "s/^version: .*/version: ${{ steps.v.outputs.name }}+${{ steps.v.outputs.code }}/" pubspec.yaml
+          grep -n '^version:' pubspec.yaml
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      # libmpv 的 4 个 jar 由 Gradle 插件从 GitHub releases 拉取，CI 可直连
+      - name: Build APKs
+        run: flutter build apk --release --split-per-abi
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p out
+          ver="${{ steps.v.outputs.name }}"
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk "out/ApexDrama-v${ver}-arm64-v8a.apk"
+          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk "out/ApexDrama-v${ver}-armeabi-v7a.apk"
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: out/*
+          if-no-files-found: error
+
+  windows:
+    name: Build Windows package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version from tag
+        id: v
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME -replace '^v', ''
+          if ($tag -notmatch '^\d+\.\d+\.\d+$') {
+            throw "tag 必须是 vx.y.z 形式，当前为 $($env:GITHUB_REF_NAME)"
+          }
+          $parts = $tag.Split('.')
+          $code = [int]$parts[0] * 100 + [int]$parts[1] * 10 + [int]$parts[2]
+          "name=$tag" >> $env:GITHUB_OUTPUT
+          "code=$code" >> $env:GITHUB_OUTPUT
+
+      - name: Sync pubspec version with tag
+        shell: pwsh
+        run: |
+          $version = "${{ steps.v.outputs.name }}+${{ steps.v.outputs.code }}"
+          $content = [System.IO.File]::ReadAllText("pubspec.yaml", [System.Text.Encoding]::UTF8)
+          $updated = [regex]::Replace($content, '(?m)^version:.*', "version: $version")
+          [System.IO.File]::WriteAllText("pubspec.yaml", $updated, (New-Object System.Text.UTF8Encoding($false)))
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      # 打包脚本会查找本机或 Program Files (x86) 下的 ISCC
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build and package
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File tool/package_windows.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/*-windows-x64.zip
+            dist/*-windows-x64-setup.exe
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version from tag
+        id: v
+        run: echo "name=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Extract release notes from updates.json
+        run: |
+          ver="${{ steps.v.outputs.name }}"
+          python3 - "$ver" <<'PY' > NOTES.md
+          import json, sys
+          ver = sys.argv[1]
+          with open('updates.json', encoding='utf-8') as f:
+              data = json.load(f)
+          if ver not in data:
+              sys.exit(f"updates.json 里没有 {ver} 的条目，请先补充更新说明")
+          print(data[ver]['notes'].strip())
+          PY
+          echo "--- NOTES.md ---"
+          cat NOTES.md
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ver="${{ steps.v.outputs.name }}"
+          gh release create "v$ver" \
+            --title "ApexDrama v$ver" \
+            --notes-file NOTES.md \
+            --verify-tag \
+            dist/ApexDrama-v$ver-arm64-v8a.apk \
+            dist/ApexDrama-v$ver-armeabi-v7a.apk \
+            dist/ApexDrama-$ver-windows-x64-setup.exe \
+            dist/ApexDrama-$ver-windows-x64.zip
