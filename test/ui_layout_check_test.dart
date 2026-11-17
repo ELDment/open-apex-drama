@@ -739,16 +739,18 @@ void main() {
       PlayerScreen(drama: mockHero),
       size: const Size(320, 640),
     );
-    await tester.tap(find.text('倍速'));
+    // 纯 UI 环境下 Player 未就绪，右侧操作栏与底部兜底控制行会同时渲染
+    // 倍速入口（Windows 因走桌面布局只渲染一处）。两者打开同一面板，取第一个。
+    await tester.tap(find.text('倍速').first);
     await tester.pumpAndSettle();
     expect(find.text('倍速播放'), findsOneWidget);
     expect(find.text('0.5x'), findsOneWidget);
     expect(find.text('2.0x'), findsOneWidget);
 
-    // 选中 1.5x：面板关闭，倍速状态同步到右侧按钮 label。
+    // 选中 1.5x：面板关闭，倍速状态同步到按钮 label（移动端布局下两处同步）。
     await tester.tap(find.text('1.5x'));
     await tester.pumpAndSettle();
-    expect(find.text('1.5x'), findsOneWidget);
+    expect(find.text('1.5x'), findsWidgets);
     expect(find.text('倍速'), findsNothing);
     expect(tester.takeException(), isNull);
   });
