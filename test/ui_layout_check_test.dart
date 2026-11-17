@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -708,17 +709,18 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('player quality sheet opens from the bottom control bar', (
+  testWidgets('player quality sheet opens from the playback settings sheet', (
     WidgetTester tester,
   ) async {
-    // mock 环境 Player 初始化失败降级为纯 UI，清晰度入口保持可见；
-    // resolve 只有单档流，这里只做 UI 层面断言：面板可开、标题出现。
+    // 移动端竖屏把清晰度收进「播放设置」；这里验证右栏入口能打开清晰度面板。
     await pumpScreen(
       tester,
       PlayerScreen(drama: mockHero),
       size: const Size(390, 844),
     );
-    await tester.tap(find.byTooltip('清晰度'));
+    await tester.tap(find.byTooltip('播放设置'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('清晰度'));
     await tester.pumpAndSettle();
     expect(find.text('清晰度'), findsOneWidget);
     // 纯 UI 环境下 bundle 未解析，面板呈现解析中空态而不是崩溃。
@@ -753,6 +755,114 @@ void main() {
     expect(find.text('1.5x'), findsWidgets);
     expect(find.text('倍速'), findsNothing);
     expect(tester.takeException(), isNull);
+  });
+
+  test('player sheet zone is the middle third', () {
+    expect(isPlayerSheetZone(10, 300), isFalse);
+    expect(isPlayerSheetZone(100, 300), isTrue);
+    expect(isPlayerSheetZone(150, 300), isTrue);
+    expect(isPlayerSheetZone(200, 300), isTrue);
+    expect(isPlayerSheetZone(290, 300), isFalse);
+  });
+
+  test('next preload episode respects the last episode', () {
+    expect(nextPreloadEpisode(1, 3), 2);
+    expect(nextPreloadEpisode(2, 3), 3);
+    expect(nextPreloadEpisode(3, 3), 0);
+    expect(nextPreloadEpisode(1, 0), 0);
+  });
+
+  test('vertical swipe commits only past threshold or fast flick', () {
+    expect(
+      swipeCommitDirection(dy: -300, velocity: 0, height: 800),
+      1,
+    );
+    expect(
+      swipeCommitDirection(dy: -100, velocity: -900, height: 800),
+      1,
+    );
+    expect(
+      swipeCommitDirection(dy: -100, velocity: 0, height: 800),
+      0,
+    );
+    expect(
+      swipeCommitDirection(dy: 300, velocity: 0, height: 800),
+      -1,
+    );
+    expect(
+      swipeCommitDirection(dy: 100, velocity: 0, height: 800),
+      0,
+    );
+  });
+
+  testWidgets('player vertical swipe advances to the next episode', (
+    WidgetTester tester,
+  ) async {
+    await pumpScreen(
+      tester,
+      PlayerScreen(drama: mockHero),
+      size: const Size(390, 844),
+    );
+    expect(find.text('第1集'), findsOneWidget);
+
+    await tester.drag(find.byType(PlayerScreen), const Offset(0, -400));
+    await tester.pump(const Duration(milliseconds: 320));
+    await tester.pumpAndSettle();
+
+    expect(find.text('第2集'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('player mobile layout hides next episode and adds settings entry', (
+    WidgetTester tester,
+  ) async {
+    await pumpScreen(
+      tester,
+      PlayerScreen(drama: mockHero),
+      size: const Size(390, 844),
+    );
+
+    expect(find.text('下一集'), findsNothing);
+    expect(find.byTooltip('播放设置'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('player mobile settings sheet lists playback options', (
+    WidgetTester tester,
+  ) async {
+    await pumpScreen(
+      tester,
+      PlayerScreen(drama: mockHero),
+      size: const Size(390, 844),
+    );
+
+    await tester.tap(find.byTooltip('播放设置'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('清晰度'), findsOneWidget);
+    expect(find.text('弹幕设置'), findsOneWidget);
+    expect(find.text('自动播放'), findsOneWidget);
+    expect(find.text('音量'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('player desktop layout keeps the next episode panel', (
+    WidgetTester tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      await pumpScreen(
+        tester,
+        PlayerScreen(drama: mockHero),
+        size: const Size(800, 1000),
+      );
+
+      expect(find.text('下一集'), findsOneWidget);
+      expect(find.byTooltip('播放设置'), findsNothing);
+      expect(tester.takeException(), isNull);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
   });
 
   testWidgets('following tabs render data from the persisted watch store', (

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -25,6 +26,7 @@ import '../providers/watch_providers.dart';
 import '../theme/app_colors.dart';
 import '../widgets/danmaku_layer.dart';
 import '../widgets/danmaku_settings.dart';
+import '../widgets/player_actions_sheet.dart';
 import '../widgets/poster_artwork.dart';
 
 Future<void> openPlayer(
@@ -89,7 +91,8 @@ class PlayerScreen extends ConsumerStatefulWidget {
   ConsumerState<PlayerScreen> createState() => _PlayerScreenState();
 }
 
-class _PlayerScreenState extends ConsumerState<PlayerScreen> {
+class _PlayerScreenState extends ConsumerState<PlayerScreen>
+    with SingleTickerProviderStateMixin {
   // media_kit 依赖原生库；纯 Dart 环境（如 widget 测试）初始化会抛错，
   // 因此构建失败时降级为「仅 UI」而不是崩溃。
   Player? _player;
@@ -101,6 +104,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   // 当前分集解析结果（含全部清晰度档位）与正在播放的流。
   PlaybackBundle? _bundle;
   StreamInfo? _currentStream;
+
+  /// 相邻集预加载播放器：移动端竖屏滑动切集时提供第二路视频。
+  /// 只保留一集，停止时静音暂停；提升为当前集后释放旧播放器并继续预取。
+  Player? _preloadPlayer;
+  VideoController? _preloadController;
+  int? _preloadEpisode;
+  PlaybackBundle? _preloadBundle;
+  StreamInfo? _preloadStream;
+  bool _preloading = false;
+  bool _preloadQueued = false;
 
   /// 播放进度落盘节流间隔（毫秒）：播放中每 5 秒最多写一次。
   static const int _progressWriteIntervalMs = 5000;
@@ -169,6 +182,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   bool _scrubbing = false;
   Duration _scrubTarget = Duration.zero;
 
+  /// 上下滑切集：跟手位移与动画控制器。
+  /// [_swipeDirection] 1 = 下一集（从底部进入），-1 = 上一集（从顶部进入）。
+  double _swipeDy = 0;
+  int _swipeDirection = 0;
+  late final AnimationController _swipeController;
+  Animation<double>? _swipeAnimation;
+
   /// 空格播放/暂停的硬件级兜底：控件点击后焦点会落到按钮上，
   /// CallbackShortcuts 随之失效（空格变成「按下聚焦的按钮」）；
   /// HardwareKeyboard 处理器优先于焦点链，保证任意焦点下空格
@@ -225,6 +245,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       _isFullscreen ||
       MediaQuery.orientationOf(context) == Orientation.landscape;
 
+  /// 是否走移动端竖屏播放布局。
+  ///
+  /// 用 [defaultTargetPlatform] 而不是 [Platform.isWindows]：运行时桌面仍然
+  /// 走原布局，widget 测试则能直接覆盖移动分支。macOS/Linux 桌面不在
+  /// 发版范围，按桌面处理。
+  bool get _isMobilePlatform =>
+      defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS;
+
   void _onMouseHover(PointerEvent event) {
     if (!_controlsVisible) {
       setState(() => _controlsVisible = true);
@@ -238,7 +267,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   /// 桌面沿用鼠标静置隐藏。
   void _scheduleControlsHide() {
     _controlsHideTimer?.cancel();
-    final bool mobile = !Platform.isWindows;
+    final bool mobile = _isMobilePlatform;
     if (mobile && !_isWideLayout) {
       return;
     }
@@ -294,6 +323,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   void initState() {
     super.initState();
     HardwareKeyboard.instance.addHandler(_handleKeyEvent);
+    _swipeController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 240),
+    )..addListener(_onSwipeTick);
     _episode = widget.episodeNumber;
     _episodeCount = _activeDrama.episodes;
     try {
@@ -355,6 +388,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     } catch (_) {}
     HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
     _controlsHideTimer?.cancel();
+    _swipeController.dispose();
+    _disposePreload(notify: false);
     _completedSub?.cancel();
     _positionSub?.cancel();
     _playingSub?.cancel();
@@ -475,6 +510,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     if (player == null) {
       return;
     }
+    // 任何重新开流的路径都先释放相邻集预加载，避免旧 Surface 残留。
+    _disposePreload(notify: false);
     final int token = ++_bootToken;
     bool superseded() => !mounted || token != _bootToken;
     setState(() {
@@ -563,6 +600,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
       if (mounted) {
         setState(() => _loading = false);
+        // 当前集开播后再预加载下一集，避免未观看也消耗解析额度。
+        unawaited(_preloadNext());
       }
     } on ApiException catch (error) {
       debugPrint('[player] 解析失败 ${error.code}: ${error.message}');
@@ -702,6 +741,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     if (_episodeCount > 0 && next > _episodeCount) {
       return;
     }
+    // 预加载已就绪时直接提升，自动连播/快捷键下一集也能无缝衔接。
+    if (_preloadEpisode == next && _preloadPlayer != null) {
+      _promotePreload();
+      return;
+    }
     // 切集前把当前集的最终进度落盘（播完时 progress==duration，
     // 该集会自然移出「继续观看」但保留在历史里）。
     _persistProgress(force: true);
@@ -735,6 +779,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       return;
     }
     if (_isFullscreen) {
+      // 全屏保持原有单播放器行为，先释放相邻集预加载。
+      _disposePreload();
       SystemChrome.setPreferredOrientations(<DeviceOrientation>[
         DeviceOrientation.landscapeLeft,
         DeviceOrientation.landscapeRight,
@@ -752,6 +798,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         DeviceOrientation.portraitUp,
       ]);
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      // 等方向恢复后再预取，避免仍处于横屏时被 gate 掉。
+      Future<void>.delayed(const Duration(milliseconds: 400), () {
+        if (mounted) {
+          unawaited(_preloadNext());
+        }
+      });
     }
   }
 
@@ -778,6 +830,27 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
       builder: builder,
+    );
+  }
+
+  /// 移动端播放设置：右栏「设置」和长按中间共用同一入口。
+  void _showPlayerActions() {
+    showPlayerActionsSheet(
+      context,
+      autoPlay: _autoPlay,
+      onAutoPlayChanged: (bool value) => setState(() => _autoPlay = value),
+      volume: _muted ? 0 : _volume,
+      muted: _muted,
+      onVolumeChanged: (double value) {
+        setState(() {
+          _volume = value;
+          _muted = value <= 0.01;
+        });
+        _player?.setVolume(_volume * 100);
+      },
+      qualityLabel: _currentStream?.definition ?? '',
+      onQuality: _showQualitySheet,
+      onDanmakuSettings: () => showDanmakuSettings(context),
     );
   }
 
@@ -1001,6 +1074,304 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     }
   }
 
+  void _onSwipeTick() {
+    final Animation<double>? animation = _swipeAnimation;
+    if (animation == null || !mounted) {
+      return;
+    }
+    setState(() => _swipeDy = animation.value);
+  }
+
+  Future<void> _animateSwipe(
+    double target, {
+    Duration duration = const Duration(milliseconds: 240),
+  }) {
+    final Completer<void> done = Completer<void>();
+    _swipeController.stop();
+    _swipeAnimation = Tween<double>(begin: _swipeDy, end: target).animate(
+      CurvedAnimation(parent: _swipeController, curve: Curves.easeOutCubic),
+    );
+    _swipeController.duration = duration;
+    _swipeController.forward(from: 0).whenComplete(() {
+      _swipeAnimation = null;
+      if (!done.isCompleted) {
+        done.complete();
+      }
+    });
+    return done.future;
+  }
+
+  void _onVerticalDragStart(DragStartDetails details) {
+    if (!_isMobilePlatform || _isWideLayout) {
+      return;
+    }
+    _swipeController.stop();
+  }
+
+  void _onVerticalDragUpdate(DragUpdateDetails details) {
+    if (!_isMobilePlatform || _isWideLayout) {
+      return;
+    }
+    final double height = MediaQuery.sizeOf(context).height;
+    final double next = (_swipeDy + details.delta.dy).clamp(-height, height);
+    if (next == _swipeDy) {
+      return;
+    }
+    setState(() {
+      _swipeDy = next;
+      _swipeDirection = next < 0
+          ? 1
+          : next > 0
+          ? -1
+          : 0;
+    });
+  }
+
+  void _onVerticalDragEnd(DragEndDetails details) {
+    if (!_isMobilePlatform || _isWideLayout) {
+      return;
+    }
+    final double height = MediaQuery.sizeOf(context).height;
+    final int direction = swipeCommitDirection(
+      dy: _swipeDy,
+      velocity: details.velocity.pixelsPerSecond.dy,
+      height: height,
+    );
+    if (direction == 0) {
+      unawaited(
+        _animateSwipe(0, duration: const Duration(milliseconds: 220)).then((_) {
+          if (mounted) {
+            setState(() => _swipeDirection = 0);
+          }
+        }),
+      );
+      return;
+    }
+    unawaited(_commitSwipe(direction));
+  }
+
+  Future<void> _commitSwipe(int direction) async {
+    final double height = MediaQuery.sizeOf(context).height;
+    await _animateSwipe(-direction * height);
+    if (!mounted) {
+      return;
+    }
+    if (direction > 0) {
+      if (_preloadEpisode == _episode + 1 && _preloadPlayer != null) {
+        _promotePreload();
+      } else {
+        _playNext();
+        setState(() {
+          _swipeDy = 0;
+          _swipeDirection = 0;
+        });
+      }
+      return;
+    }
+    _playPrevious();
+    setState(() {
+      _swipeDy = 0;
+      _swipeDirection = 0;
+    });
+  }
+
+  Widget _buildSwipePreview() {
+    final VideoController? controller = _preloadController;
+    if (controller != null && _preloadEpisode == _episode + 1) {
+      return IgnorePointer(
+        child: Center(
+          child: Video(
+            controller: controller,
+            controls: NoVideoControls,
+            fit: BoxFit.contain,
+          ),
+        ),
+      );
+    }
+    return PosterArtwork(drama: _activeDrama, variant: PosterVariant.full);
+  }
+
+  EpisodeInfo? _episodeByNumber(int number) {
+    for (final EpisodeInfo item in _episodes) {
+      if (item.number == number) {
+        return item;
+      }
+    }
+    return null;
+  }
+
+  /// 预加载相邻一集：与当前集同档清晰度，暂停并静音，等滑动时直接出画面。
+  Future<void> _preloadNext() async {
+    if (!_isMobilePlatform || _isWideLayout) {
+      return;
+    }
+    final int next = nextPreloadEpisode(_episode, _episodeCount);
+    if (next == 0) {
+      _disposePreload();
+      return;
+    }
+    if (_preloadEpisode == next && _preloadController != null) {
+      return;
+    }
+    if (_preloading) {
+      // 切集很快时把请求排队，等当前预加载结束后按新集重跑。
+      _preloadQueued = true;
+      return;
+    }
+    _preloading = true;
+    Player? player;
+    try {
+      final EpisodeInfo? info = _episodeByNumber(next);
+      if (info == null) {
+        return;
+      }
+      final PlaybackBundle bundle = await ref
+          .read(playbackRepositoryProvider)
+          .resolve(info.id);
+      if (!mounted || !_isMobilePlatform || _isWideLayout) {
+        return;
+      }
+      if (_episode != next - 1) {
+        return;
+      }
+      final StreamInfo chosen = _pickStream(bundle, _currentStream);
+      if (chosen.url.isEmpty) {
+        return;
+      }
+      player = Player();
+      final VideoController controller = VideoController(
+        player,
+        configuration: videoOutputConfiguration(defaultVideoOutputMode()),
+      );
+      // 与首次进场一致：先给原生 Surface 一点初始化时间，再 open，
+      // 否则 mediacodec_embed 下可能因 surface 未就绪直接失败。
+      await WidgetsBinding.instance.endOfFrame;
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      if (!mounted ||
+          !_isMobilePlatform ||
+          _isWideLayout ||
+          _episode != next - 1) {
+        return;
+      }
+      if (bundle.hasKey) {
+        await (player.platform as dynamic).setProperty(
+          'demuxer-lavf-o',
+          'decryption_key=${bundle.contentKeyHex}',
+        );
+      }
+      await (player.platform as dynamic).setProperty(
+        'user-agent',
+        kCdnUserAgent,
+      );
+      await player.setVolume(0);
+      await player.open(Media(chosen.url));
+      await player.pause();
+      await player.setVolume(0);
+      _disposePreload();
+      _preloadPlayer = player;
+      _preloadController = controller;
+      _preloadEpisode = next;
+      _preloadBundle = bundle;
+      _preloadStream = chosen;
+      player = null;
+      if (mounted) {
+        setState(() {});
+      }
+    } catch (_) {
+      // 预加载失败不打扰正片：滑动回退封面，松手后走 _boot。
+    } finally {
+      if (player != null) {
+        try {
+          await player.dispose();
+        } catch (_) {}
+      }
+      _preloading = false;
+      if (_preloadQueued) {
+        _preloadQueued = false;
+        unawaited(_preloadNext());
+      }
+    }
+  }
+
+  void _disposePreload({bool notify = true}) {
+    final Player? player = _preloadPlayer;
+    _preloadPlayer = null;
+    _preloadController = null;
+    _preloadEpisode = null;
+    _preloadBundle = null;
+    _preloadStream = null;
+    if (player != null) {
+      try {
+        player.stop();
+      } catch (_) {}
+      unawaited(player.dispose());
+    }
+    if (notify && mounted) {
+      setState(() {});
+    }
+  }
+
+  /// 把预加载播放器提升为当前集：旧播放器释放，新播放器恢复音量/倍速/播放。
+  void _promotePreload() {
+    final Player? nextPlayer = _preloadPlayer;
+    final VideoController? nextController = _preloadController;
+    final int? nextEpisode = _preloadEpisode;
+    final PlaybackBundle? nextBundle = _preloadBundle;
+    final StreamInfo? nextStream = _preloadStream;
+    if (nextPlayer == null || nextController == null || nextEpisode == null) {
+      _playNext();
+      return;
+    }
+    _persistProgress(force: true);
+    final Player? oldPlayer = _player;
+    _completedSub?.cancel();
+    _completedSub = null;
+    _positionSub?.cancel();
+    _positionSub = null;
+    _playingSub?.cancel();
+    _playingSub = null;
+    _videoParamsSub?.cancel();
+    _videoParamsSub = null;
+    _player = nextPlayer;
+    _controller = nextController;
+    _episode = nextEpisode;
+    _bundle = nextBundle;
+    _currentStream = nextStream;
+    _preferredDefinition = nextStream?.definition ?? _preferredDefinition;
+    _preloadPlayer = null;
+    _preloadController = null;
+    _preloadEpisode = null;
+    _preloadBundle = null;
+    _preloadStream = null;
+    _swipeDy = 0;
+    _swipeDirection = 0;
+    _loading = false;
+    _error = null;
+    _observeProgress(nextPlayer);
+    _completedSub = nextPlayer.stream.completed.listen((bool done) {
+      if (done && _autoPlay && mounted) {
+        _playNext();
+      }
+    });
+    nextPlayer.setVolume(_muted ? 0 : _volume * 100);
+    nextPlayer.setRate(_rate);
+    nextPlayer.play();
+    final EpisodeInfo? info = _episodeByNumber(nextEpisode);
+    if (info != null) {
+      unawaited(_loadDanmaku(info.id));
+    }
+    if (mounted) {
+      setState(() {});
+    }
+    if (oldPlayer != null) {
+      try {
+        oldPlayer.stop();
+      } catch (_) {}
+      unawaited(oldPlayer.dispose());
+    }
+    unawaited(_preloadNext());
+  }
+
   /// 单步 seek（桌面 ←/→ 快捷键用）：在当前位置上叠加
   /// [delta]（正 = 快进、负 = 快退），钳制在 [0, duration]；
   /// 时长未知时忽略。
@@ -1087,6 +1458,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       danmakuOn: _danmakuOn,
       onToggleDanmaku: _toggleDanmaku,
       onDanmakuSettings: () => showDanmakuSettings(context),
+      onMore: _showPlayerActions,
     );
   }
 
@@ -1151,6 +1523,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final bool isWide =
         _isFullscreen ||
         MediaQuery.orientationOf(context) == Orientation.landscape;
+    // 移动端竖屏：底部只留进度 + 全屏，传输按钮交给点按/滑动。
+    final bool compactControls = !isWide && _isMobilePlatform;
 
     return CallbackShortcuts(
       bindings: _shortcutBindings,
@@ -1181,16 +1555,30 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                   : MouseCursor.defer,
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: Platform.isWindows ? _onDesktopTap : _onMobileTap,
+                onTap: _isMobilePlatform ? _onMobileTap : _onDesktopTap,
                 // 长按画面：仅移动端临时 2x，松手恢复原倍速。
                 // 桌面端不挂长按，保持原有鼠标/空格交互不变。
-                onLongPressStart: Platform.isWindows
-                    ? null
-                    : (_) => _startHoldSpeed(),
-                onLongPressEnd: Platform.isWindows
-                    ? null
-                    : (_) => _stopHoldSpeed(),
-                onLongPressCancel: Platform.isWindows ? null : _stopHoldSpeed,
+                // 移动端竖屏：长按中间 1/3 弹播放设置，左右两侧仍是临时 2x。
+                // 全屏保持原行为（任意位置长按 2x）；桌面不挂长按。
+                onLongPressStart: _isMobilePlatform
+                    ? (LongPressStartDetails details) {
+                        final double width =
+                            MediaQuery.sizeOf(context).width;
+                        if (!isWide &&
+                            isPlayerSheetZone(
+                              details.localPosition.dx,
+                              width,
+                            )) {
+                          _showPlayerActions();
+                        } else {
+                          _startHoldSpeed();
+                        }
+                      }
+                    : null,
+                onLongPressEnd: _isMobilePlatform
+                    ? (_) => _stopHoldSpeed()
+                    : null,
+                onLongPressCancel: _isMobilePlatform ? _stopHoldSpeed : null,
                 onHorizontalDragStart: (_) => _startScrub(),
                 onHorizontalDragUpdate: (DragUpdateDetails details) {
                   final Size size = MediaQuery.sizeOf(context);
@@ -1198,6 +1586,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 },
                 onHorizontalDragEnd: (_) => _endScrub(),
                 onHorizontalDragCancel: _endScrub,
+                // 移动端竖屏：上下滑跟手切集；全屏/桌面仍走原有手势。
+                onVerticalDragStart: _onVerticalDragStart,
+                onVerticalDragUpdate: _onVerticalDragUpdate,
+                onVerticalDragEnd: _onVerticalDragEnd,
+                onVerticalDragCancel: () {
+                  if (!_isMobilePlatform || _isWideLayout) {
+                    return;
+                  }
+                  unawaited(_animateSwipe(0));
+                },
                 child: Listener(
                   behavior: HitTestBehavior.translucent,
                   // 桌面滚轮上下切集（与触摸上/下滑同语义：下滚 = 下一集）。
@@ -1213,6 +1611,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                   onPointerUp: (PointerUpEvent event) {
                     final Offset? start = _pointerStart;
                     _pointerStart = null;
+                    if (_isMobilePlatform && !isWide) {
+                      return; // 竖向切集交给跟手动画
+                    }
                     if (start == null) {
                       return;
                     }
@@ -1230,55 +1631,86 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                   child: Stack(
                     fit: StackFit.expand,
                     children: <Widget>[
-                      // 视频画面（未就绪时用封面占位）。
+                      // 当前集画面 + 弹幕：整体跟手上移/下移。
                       // 注意：vo=mediacodec_embed 下 Video 是原生 PlatformView，
                       // 会吞掉其覆盖范围内的全部触摸（导致点按切换控制层、上滑/下滑、
                       // 选集面板点击全部失效），因此必须包一层 IgnorePointer，
                       // 把所有手势交还给上层的 Flutter 手势层。
                       // 只要已经开过流就保留视频层：否则一次失败的启动会把
                       // 正在播放的画面换成封面，表现为"有声音、没画面还在报错"。
-                      if (_controller == null ||
-                          (_currentStream == null && (_loading || _error != null)))
-                        PosterArtwork(drama: drama, variant: PosterVariant.full)
-                      else
-                        IgnorePointer(
-                          child: Center(
-                            child: Video(
-                              controller: _controller!,
-                              controls: NoVideoControls,
-                              fit: BoxFit.contain,
-                            ),
+                      Positioned.fill(
+                        child: Transform.translate(
+                          offset: Offset(0, _swipeDy),
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: <Widget>[
+                              if (_controller == null ||
+                                  (_currentStream == null &&
+                                      (_loading || _error != null)))
+                                PosterArtwork(
+                                  drama: drama,
+                                  variant: PosterVariant.full,
+                                )
+                              else
+                                IgnorePointer(
+                                  child: Center(
+                                    child: Video(
+                                      controller: _controller!,
+                                      controls: NoVideoControls,
+                                      fit: BoxFit.contain,
+                                    ),
+                                  ),
+                                ),
+                              // 弹幕层压在画面上、控制层之下；关掉时不构建。
+                              // 设置变化通过全局 notifier 即时重绘，无需重建整页。
+                              // 只画在视频画面内：手机竖屏上下黑边、状态栏都不放弹幕。
+                              if (_danmakuOn && _danmakuCues.isNotEmpty)
+                                Positioned.fromRect(
+                                  rect: danmakuVideoRect(
+                                    area: MediaQuery.sizeOf(context),
+                                    videoWidth: _videoWidth,
+                                    videoHeight: _videoHeight,
+                                  ),
+                                  child:
+                                      ValueListenableBuilder<DanmakuSettings>(
+                                        valueListenable:
+                                            danmakuSettingsNotifier,
+                                        builder:
+                                            (
+                                              BuildContext context,
+                                              DanmakuSettings settings,
+                                              _,
+                                            ) {
+                                              return DanmakuLayer(
+                                                cues: _danmakuCues,
+                                                position: _danmakuClock,
+                                                playing: _danmakuPlaying,
+                                                travel: settings.travel,
+                                                fontSize: settings.fontSize,
+                                                area: settings.area,
+                                                // 长按临时倍速同样需要让弹幕跟上进度。
+                                                rate: _holdSpeedActive
+                                                    ? _holdRate
+                                                    : _rate,
+                                              );
+                                            },
+                                      ),
+                                ),
+                            ],
                           ),
                         ),
-                      // 弹幕层压在画面上、控制层之下；关掉时不构建。
-                      // 设置变化通过全局 notifier 即时重绘，无需重建整页。
-                      // 只画在视频画面内：手机竖屏上下黑边、状态栏都不放弹幕。
-                      if (_danmakuOn && _danmakuCues.isNotEmpty)
-                        Positioned.fromRect(
-                          rect: danmakuVideoRect(
-                            area: MediaQuery.sizeOf(context),
-                            videoWidth: _videoWidth,
-                            videoHeight: _videoHeight,
-                          ),
-                          child: ValueListenableBuilder<DanmakuSettings>(
-                            valueListenable: danmakuSettingsNotifier,
-                            builder:
-                                (
-                                  BuildContext context,
-                                  DanmakuSettings settings,
-                                  _,
-                                ) {
-                                  return DanmakuLayer(
-                                    cues: _danmakuCues,
-                                    position: _danmakuClock,
-                                    playing: _danmakuPlaying,
-                                    travel: settings.travel,
-                                    fontSize: settings.fontSize,
-                                    area: settings.area,
-                                    // 长按临时倍速同样需要让弹幕跟上进度。
-                                    rate: _holdSpeedActive ? _holdRate : _rate,
-                                  );
-                                },
+                      ),
+                      // 相邻集预览：上滑从底部进入，下滑从顶部进入。
+                      if (_swipeDirection != 0 && !isWide)
+                        Positioned.fill(
+                          child: Transform.translate(
+                            offset: Offset(
+                              0,
+                              _swipeDirection *
+                                      MediaQuery.sizeOf(context).height +
+                                  _swipeDy,
+                            ),
+                            child: _buildSwipePreview(),
                           ),
                         ),
                       if (_loading) const _CenteredStatus(loading: true),
@@ -1353,9 +1785,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                                                   _toggleFullscreen,
                                               // 手机端才收进右侧操作栏；
                                               // Windows 始终保持原桌面布局。
-                                              compact:
-                                                  !isWide &&
-                                                  !Platform.isWindows,
+                                              compact: compactControls,
                                             ),
                                           )
                                         else
@@ -1372,21 +1802,26 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                                             child: Row(
                                               children: <Widget>[
                                                 const Spacer(),
-                                                _RailTextAction(
-                                                  label: _speedLabel,
-                                                  onTap: _showSpeedSheet,
-                                                ),
-                                                _GlassSquareButton(
-                                                  icon: Icons
-                                                      .high_quality_rounded,
-                                                  tooltip: '清晰度',
-                                                  onPressed: _showQualitySheet,
-                                                ),
-                                                _GlassSquareButton(
-                                                  icon: Icons.list_rounded,
-                                                  tooltip: '选集',
-                                                  onPressed: _showEpisodes,
-                                                ),
+                                                if (!compactControls) ...<
+                                                  Widget
+                                                >[
+                                                  _RailTextAction(
+                                                    label: _speedLabel,
+                                                    onTap: _showSpeedSheet,
+                                                  ),
+                                                  _GlassSquareButton(
+                                                    icon: Icons
+                                                        .high_quality_rounded,
+                                                    tooltip: '清晰度',
+                                                    onPressed:
+                                                        _showQualitySheet,
+                                                  ),
+                                                  _GlassSquareButton(
+                                                    icon: Icons.list_rounded,
+                                                    tooltip: '选集',
+                                                    onPressed: _showEpisodes,
+                                                  ),
+                                                ],
                                                 _GlassSquareButton(
                                                   icon: isWide
                                                       ? Icons
@@ -1401,9 +1836,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                                               ],
                                             ),
                                           ),
-                                        // 横屏（全屏 / 物理旋转）时隐藏下一集面板，
-                                        // 空间留给画面。
-                                        if (!isWide) ...<Widget>[
+                                        // 桌面端保留原「下一集」面板；移动端
+                                        // 竖屏已改成上下滑切集，不再展示。
+                                        if (!isWide && !_isMobilePlatform) ...<
+                                          Widget
+                                        >[
                                           const SizedBox(height: 10),
                                           _NextEpisodePanel(
                                             drama: drama,
@@ -1465,7 +1902,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                                   // 桌面端即使窗口偏窄也保持原操作栏
                                   // （收藏 / 分享），不换成手机版布局。
                                   child: _buildActionRail(
-                                    compact: !Platform.isWindows,
+                                    compact: compactControls,
                                   ),
                                 ),
                               ),
@@ -1673,6 +2110,47 @@ class _GlassSquareButton extends StatelessWidget {
   }
 }
 
+/// 长按中间 1/3 打开播放设置；两侧仍走临时 2x。
+@visibleForTesting
+bool isPlayerSheetZone(double x, double width) {
+  if (width <= 0) {
+    return false;
+  }
+  return x >= width / 3 && x <= width * 2 / 3;
+}
+
+const double _swipeCommitFraction = 0.28;
+const double _swipeCommitVelocity = 800;
+
+/// 下一集预加载目标；最后一集或不合法输入返回 0。
+@visibleForTesting
+int nextPreloadEpisode(int current, int count) {
+  if (count <= 0 || current < 1 || current >= count) {
+    return 0;
+  }
+  return current + 1;
+}
+
+/// 上下滑松手方向：1 = 下一集，-1 = 上一集，0 = 回弹。
+@visibleForTesting
+int swipeCommitDirection({
+  required double dy,
+  required double velocity,
+  required double height,
+}) {
+  if (height <= 0) {
+    return 0;
+  }
+  final double threshold = height * _swipeCommitFraction;
+  if (dy < 0 && (dy.abs() >= threshold || velocity <= -_swipeCommitVelocity)) {
+    return 1;
+  }
+  if (dy > 0 && (dy.abs() >= threshold || velocity >= _swipeCommitVelocity)) {
+    return -1;
+  }
+  return 0;
+}
+
 String _formatDuration(Duration value) {
   final int totalSeconds = value.inSeconds;
   final int minutes = (totalSeconds ~/ 60) % 60;
@@ -1783,100 +2261,112 @@ class _PlaybackProgress extends StatelessWidget {
                     const SizedBox(height: 2),
                     Row(
                       children: <Widget>[
-                        _GlassSquareButton(
-                          icon: Icons.skip_previous_rounded,
-                          tooltip: '上一集',
-                          onPressed: onPrevious,
-                        ),
-                        StreamBuilder<bool>(
-                          stream: player.stream.playing,
-                          initialData: player.state.playing,
-                          builder:
-                              (
-                                BuildContext context,
-                                AsyncSnapshot<bool> snapshot,
-                              ) {
-                                final bool playing = snapshot.data ?? false;
-                                return Semantics(
-                                  button: true,
-                                  label: playing ? '暂停' : '播放',
-                                  child: IconButton(
-                                    tooltip: playing ? '暂停' : '播放',
-                                    onPressed: onTogglePlay,
-                                    icon: Icon(
-                                      playing
-                                          ? Icons.pause_rounded
-                                          : Icons.play_arrow_rounded,
-                                      size: 26,
-                                      color: Colors.white,
+                        // 移动端竖屏：点画面暂停、上下滑切集，底部只留全屏。
+                        if (compact) ...<Widget>[
+                          const Spacer(),
+                          _GlassSquareButton(
+                            icon: isFullscreen
+                                ? Icons.fullscreen_exit_rounded
+                                : Icons.fullscreen_rounded,
+                            tooltip: isFullscreen ? '退出全屏' : '全屏',
+                            onPressed: onToggleFullscreen,
+                          ),
+                        ] else ...<Widget>[
+                          _GlassSquareButton(
+                            icon: Icons.skip_previous_rounded,
+                            tooltip: '上一集',
+                            onPressed: onPrevious,
+                          ),
+                          StreamBuilder<bool>(
+                            stream: player.stream.playing,
+                            initialData: player.state.playing,
+                            builder:
+                                (
+                                  BuildContext context,
+                                  AsyncSnapshot<bool> snapshot,
+                                ) {
+                                  final bool playing =
+                                      snapshot.data ?? false;
+                                  return Semantics(
+                                    button: true,
+                                    label: playing ? '暂停' : '播放',
+                                    child: IconButton(
+                                      tooltip: playing ? '暂停' : '播放',
+                                      onPressed: onTogglePlay,
+                                      icon: Icon(
+                                        playing
+                                            ? Icons.pause_rounded
+                                            : Icons.play_arrow_rounded,
+                                        size: 26,
+                                        color: Colors.white,
+                                      ),
+                                      padding: EdgeInsets.zero,
+                                      constraints:
+                                          const BoxConstraints.tightFor(
+                                            width: 34,
+                                            height: 34,
+                                          ),
                                     ),
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints.tightFor(
-                                      width: 34,
-                                      height: 34,
-                                    ),
-                                  ),
-                                );
-                              },
-                        ),
-                        _GlassSquareButton(
-                          icon: Icons.skip_next_rounded,
-                          tooltip: '下一集',
-                          onPressed: onNext,
-                        ),
-                        const SizedBox(width: 6),
-                        _GlassSquareButton(
-                          icon: muted
-                              ? Icons.volume_off_rounded
-                              : Icons.volume_up_rounded,
-                          tooltip: muted ? '取消静音' : '静音',
-                          onPressed: onToggleMute,
-                        ),
-                        SizedBox(
-                          // 手机端收窄音量条，给清晰度 / 全屏留出空间，
-                          // 避免横向溢出把右侧按钮挤出屏幕。
-                          width: compact ? 64 : 90,
-                          child: SliderTheme(
-                            data: SliderThemeData(
-                              trackHeight: 3,
-                              overlayShape: SliderComponentShape.noOverlay,
-                              thumbShape: const RoundSliderThumbShape(
-                                enabledThumbRadius: 5,
+                                  );
+                                },
+                          ),
+                          _GlassSquareButton(
+                            icon: Icons.skip_next_rounded,
+                            tooltip: '下一集',
+                            onPressed: onNext,
+                          ),
+                          const SizedBox(width: 6),
+                          _GlassSquareButton(
+                            icon: muted
+                                ? Icons.volume_off_rounded
+                                : Icons.volume_up_rounded,
+                            tooltip: muted ? '取消静音' : '静音',
+                            onPressed: onToggleMute,
+                          ),
+                          SizedBox(
+                            width: 90,
+                            child: SliderTheme(
+                              data: SliderThemeData(
+                                trackHeight: 3,
+                                overlayShape: SliderComponentShape.noOverlay,
+                                thumbShape: const RoundSliderThumbShape(
+                                  enabledThumbRadius: 5,
+                                ),
+                                activeTrackColor: AppTokens.immersiveAccent,
+                                inactiveTrackColor: Colors.white.withValues(
+                                  alpha: 0.24,
+                                ),
+                                thumbColor: Colors.white,
                               ),
-                              activeTrackColor: AppTokens.immersiveAccent,
-                              inactiveTrackColor: Colors.white.withValues(
-                                alpha: 0.24,
+                              child: Slider(
+                                value: (muted ? 0.0 : volume).clamp(0.0, 1.0),
+                                onChanged: onVolumeChanged,
                               ),
-                              thumbColor: Colors.white,
-                            ),
-                            child: Slider(
-                              value: (muted ? 0.0 : volume).clamp(0.0, 1.0),
-                              onChanged: onVolumeChanged,
                             ),
                           ),
-                        ),
-                        const Spacer(),
-                        if (!compact) ...<Widget>[
-                          _RailTextAction(label: speedLabel, onTap: onSpeed),
-                        ],
-                        _GlassSquareButton(
-                          icon: Icons.high_quality_rounded,
-                          tooltip: '清晰度',
-                          onPressed: onShowQuality,
-                        ),
-                        if (!compact)
+                          const Spacer(),
+                          _RailTextAction(
+                            label: speedLabel,
+                            onTap: onSpeed,
+                          ),
+                          _GlassSquareButton(
+                            icon: Icons.high_quality_rounded,
+                            tooltip: '清晰度',
+                            onPressed: onShowQuality,
+                          ),
                           _GlassSquareButton(
                             icon: Icons.list_rounded,
                             tooltip: '选集',
                             onPressed: onOpenEpisodes,
                           ),
-                        _GlassSquareButton(
-                          icon: isFullscreen
-                              ? Icons.fullscreen_exit_rounded
-                              : Icons.fullscreen_rounded,
-                          tooltip: isFullscreen ? '退出全屏' : '全屏',
-                          onPressed: onToggleFullscreen,
-                        ),
+                          _GlassSquareButton(
+                            icon: isFullscreen
+                                ? Icons.fullscreen_exit_rounded
+                                : Icons.fullscreen_rounded,
+                            tooltip: isFullscreen ? '退出全屏' : '全屏',
+                            onPressed: onToggleFullscreen,
+                          ),
+                        ],
                       ],
                     ),
                   ],
@@ -2001,6 +2491,7 @@ class _ActionRail extends StatelessWidget {
     required this.danmakuOn,
     required this.onToggleDanmaku,
     required this.onDanmakuSettings,
+    required this.onMore,
     this.favorited = false,
     this.compact = false,
   });
@@ -2013,6 +2504,9 @@ class _ActionRail extends StatelessWidget {
   final bool danmakuOn;
   final VoidCallback onToggleDanmaku;
   final VoidCallback onDanmakuSettings;
+
+  /// 移动端右栏的「播放设置」入口：稳定打开清晰度/弹幕设置/自动播放/音量。
+  final VoidCallback onMore;
   final bool favorited;
   final bool compact;
 
@@ -2030,31 +2524,55 @@ class _ActionRail extends StatelessWidget {
             onTap: onOpenEpisodes,
           ),
           const SizedBox(height: 18),
-        ],
-        _RailAction(
-          icon: danmakuOn
-              ? Icons.subtitles_rounded
-              : Icons.subtitles_off_rounded,
-          label: danmakuOn ? '弹幕开' : '弹幕关',
-          onTap: onToggleDanmaku,
-        ),
-        const SizedBox(height: 10),
-        // 开关旁边紧邻设置入口：手机端开底部弹层，桌面端开浮动面板。
-        _RailAction(
-          icon: Icons.tune_rounded,
-          label: '弹幕设置',
-          onTap: onDanmakuSettings,
-        ),
-        const SizedBox(height: 18),
-        _RailAction(
-          icon: favorited ? Icons.star_rounded : Icons.star_border_rounded,
-          label: favorited ? '已收藏' : '收藏',
-          onTap: onFavorite,
-          iconColor: favorited ? const Color(0xFFFFC94D) : null,
-        ),
-        if (!compact) ...<Widget>[
+          _RailAction(
+            icon: danmakuOn
+                ? Icons.subtitles_rounded
+                : Icons.subtitles_off_rounded,
+            label: danmakuOn ? '弹幕开' : '弹幕关',
+            onTap: onToggleDanmaku,
+          ),
+          const SizedBox(height: 10),
+          _RailAction(
+            icon: Icons.tune_rounded,
+            label: '设置',
+            tooltip: '播放设置',
+            onTap: onMore,
+          ),
+          const SizedBox(height: 18),
+          _RailAction(
+            icon: favorited ? Icons.star_rounded : Icons.star_border_rounded,
+            label: favorited ? '已收藏' : '收藏',
+            onTap: onFavorite,
+            iconColor: favorited ? const Color(0xFFFFC94D) : null,
+          ),
+        ] else ...<Widget>[
+          _RailAction(
+            icon: danmakuOn
+                ? Icons.subtitles_rounded
+                : Icons.subtitles_off_rounded,
+            label: danmakuOn ? '弹幕开' : '弹幕关',
+            onTap: onToggleDanmaku,
+          ),
+          const SizedBox(height: 10),
+          // 开关旁边紧邻设置入口：桌面端开浮动面板。
+          _RailAction(
+            icon: Icons.tune_rounded,
+            label: '弹幕设置',
+            onTap: onDanmakuSettings,
+          ),
+          const SizedBox(height: 18),
+          _RailAction(
+            icon: favorited ? Icons.star_rounded : Icons.star_border_rounded,
+            label: favorited ? '已收藏' : '收藏',
+            onTap: onFavorite,
+            iconColor: favorited ? const Color(0xFFFFC94D) : null,
+          ),
           const SizedBox(height: 20),
-          _RailAction(icon: Icons.forward_rounded, label: '分享', onTap: onShare),
+          _RailAction(
+            icon: Icons.forward_rounded,
+            label: '分享',
+            onTap: onShare,
+          ),
         ],
       ],
     );
@@ -2067,6 +2585,7 @@ class _RailAction extends StatelessWidget {
     required this.label,
     required this.onTap,
     this.iconColor,
+    this.tooltip,
   });
 
   final IconData icon;
@@ -2076,9 +2595,12 @@ class _RailAction extends StatelessWidget {
   /// 覆盖图标颜色（如收藏选中态的金色）；不传用默认白色。
   final Color? iconColor;
 
+  /// 可选 tooltip；右栏「播放设置」用它给测试和辅助功能一个稳定入口。
+  final String? tooltip;
+
   @override
   Widget build(BuildContext context) {
-    return Semantics(
+    final Widget action = Semantics(
       button: true,
       label: label,
       child: InkResponse(
@@ -2117,6 +2639,10 @@ class _RailAction extends StatelessWidget {
         ),
       ),
     );
+    if (tooltip == null) {
+      return action;
+    }
+    return Tooltip(message: tooltip!, child: action);
   }
 }
 
