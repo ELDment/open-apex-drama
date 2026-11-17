@@ -64,6 +64,7 @@ SDK 为水果平台短剧的非官方第三方库（Apache-2.0），通过 git �
   （含预编译原生库与 Windows 桥接）
 - [media_kit](https://github.com/media-kit/media-kit) — mpv 内核播放器
 - [Flutter](https://flutter.dev) / [Riverpod](https://riverpod.dev)
+- [linux.do](https://linux.do/) — 开发者交流社区
 
 ---
 
