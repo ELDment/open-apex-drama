@@ -95,6 +95,23 @@ Duration danmakuClockAt({
   return pos.isNegative ? Duration.zero : pos;
 }
 
+/// 位置更新后的偏差在 [window] 内线性补齐：0 表示刚开始，1 表示已追平。
+@visibleForTesting
+double danmakuCorrectionProgress({
+  required Duration startedAt,
+  required Duration now,
+  required Duration window,
+}) {
+  if (window <= Duration.zero) {
+    return 1;
+  }
+  final int elapsedUs = (now - startedAt).inMicroseconds;
+  if (elapsedUs <= 0) {
+    return 0;
+  }
+  return (elapsedUs / window.inMicroseconds).clamp(0.0, 1.0);
+}
+
 class _DanmakuLayerState extends State<DanmakuLayer>
     with SingleTickerProviderStateMixin {
   late final Ticker _ticker = createTicker(_onTick);
@@ -106,6 +123,18 @@ class _DanmakuLayerState extends State<DanmakuLayer>
   Duration _base = Duration.zero;
   Duration _baseAtTick = Duration.zero;
   Duration _tickNow = Duration.zero;
+
+  /// 位置更新与补间时钟的小幅偏差，在 [_correctionWindow] 内线性补齐，
+  /// 避免每 500ms 的位置事件把弹幕瞬移回播放器位置。
+  Duration _correction = Duration.zero;
+  Duration _correctionStartedAtTick = Duration.zero;
+
+  /// 偏差超过该值视为用户跳转进度，直接对齐。
+  static const Duration _hardSeekThreshold = Duration(seconds: 1);
+  static const Duration _correctionWindow = Duration(milliseconds: 300);
+
+  @visibleForTesting
+  Duration get clockForTest => _clock.value;
 
   List<_CueLayout> _layouts = const <_CueLayout>[];
   List<DanmakuCue>? _preparedCues;
@@ -133,6 +162,7 @@ class _DanmakuLayerState extends State<DanmakuLayer>
       oldWidget.position.removeListener(_onPosition);
       widget.position.addListener(_onPosition);
       _base = widget.position.value;
+      _correction = Duration.zero;
     }
     if (oldWidget.playing != widget.playing) {
       oldWidget.playing.removeListener(_onPlayingChanged);
@@ -143,6 +173,7 @@ class _DanmakuLayerState extends State<DanmakuLayer>
       // 倍速切换时按真实位置重新起算，避免沿用旧速率的时间差。
       _base = widget.position.value;
       _baseAtTick = _tickNow;
+      _correction = Duration.zero;
     }
   }
 
@@ -156,15 +187,32 @@ class _DanmakuLayerState extends State<DanmakuLayer>
   }
 
   void _onPosition() {
-    // 以播放器位置为准重新对齐，跳转进度时立即生效。
-    _base = widget.position.value;
+    final Duration target = widget.position.value;
+    final Duration current = _clock.value;
+    final Duration drift = target - current;
+
+    // 暂停或用户跳转进度：直接对齐，弹幕应立刻跟到新位置。
+    if (!widget.playing.value || drift.abs() > _hardSeekThreshold) {
+      _base = target;
+      _baseAtTick = _tickNow;
+      _correction = Duration.zero;
+      _clock.value = target;
+      return;
+    }
+
+    // 正常播放中的小幅偏差：保留当前补间位置，把误差摊到接下来
+    // 300ms 里，避免每次 position 更新（约 500ms）都瞬移一下。
+    _base = current;
     _baseAtTick = _tickNow;
+    _correction = drift;
+    _correctionStartedAtTick = _tickNow;
   }
 
   /// 播放/暂停切换时把补间基准对齐到真实位置，避免恢复播放时跳一下。
   void _onPlayingChanged() {
     _base = widget.position.value;
     _baseAtTick = _tickNow;
+    _correction = Duration.zero;
     if (!widget.playing.value) {
       _clock.value = _base;
     }
@@ -186,7 +234,30 @@ class _DanmakuLayerState extends State<DanmakuLayer>
       playing: widget.playing.value,
       rate: widget.rate,
     );
-    _clock.value = pos;
+    _clock.value = _applyCorrection(pos, elapsed);
+  }
+
+  /// 把位置更新时的偏差在 [_correctionWindow] 内线性吃掉；补完后把
+  /// 误差并入基准，避免下一帧又跳回去。
+  Duration _applyCorrection(Duration pos, Duration tickNow) {
+    final Duration correction = _correction;
+    if (correction == Duration.zero) {
+      return pos;
+    }
+    final double progress = danmakuCorrectionProgress(
+      startedAt: _correctionStartedAtTick,
+      now: tickNow,
+      window: _correctionWindow,
+    );
+    if (progress >= 1) {
+      _base += correction;
+      _baseAtTick = tickNow;
+      _correction = Duration.zero;
+      final Duration corrected = pos + correction;
+      return corrected.isNegative ? Duration.zero : corrected;
+    }
+    final Duration corrected = pos + correction * progress;
+    return corrected.isNegative ? Duration.zero : corrected;
   }
 
   @override

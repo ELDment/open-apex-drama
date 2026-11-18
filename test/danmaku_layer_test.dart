@@ -141,6 +141,80 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  test('位置偏差在 300ms 内线性补齐', () {
+    expect(
+      danmakuCorrectionProgress(
+        startedAt: Duration.zero,
+        now: Duration.zero,
+        window: const Duration(milliseconds: 300),
+      ),
+      0,
+    );
+    expect(
+      danmakuCorrectionProgress(
+        startedAt: Duration.zero,
+        now: const Duration(milliseconds: 150),
+        window: const Duration(milliseconds: 300),
+      ),
+      closeTo(0.5, 0.001),
+    );
+    expect(
+      danmakuCorrectionProgress(
+        startedAt: Duration.zero,
+        now: const Duration(milliseconds: 300),
+        window: const Duration(milliseconds: 300),
+      ),
+      1,
+    );
+    expect(
+      danmakuCorrectionProgress(
+        startedAt: Duration.zero,
+        now: const Duration(seconds: 1),
+        window: const Duration(milliseconds: 300),
+      ),
+      1,
+    );
+  });
+
+  testWidgets('位置小幅回跳不会瞬移，300ms 内平滑追平', (WidgetTester tester) async {
+    final ValueNotifier<Duration> position = ValueNotifier<Duration>(
+      Duration.zero,
+    );
+    final ValueNotifier<bool> playing = ValueNotifier<bool>(true);
+    addTearDown(position.dispose);
+    addTearDown(playing.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 400,
+            height: 300,
+            child: DanmakuLayer(
+              cues: const <DanmakuCue>[DanmakuCue(text: '平滑', offsetMs: 0)],
+              position: position,
+              playing: playing,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 500));
+    final dynamic state = tester.state(find.byType(DanmakuLayer));
+    final Duration before = state.clockForTest as Duration;
+
+    // 播放器位置比补间时钟落后 200ms：不能瞬移回去，只能小幅修正。
+    position.value = const Duration(milliseconds: 300);
+    await tester.pump(const Duration(milliseconds: 16));
+    final Duration after = state.clockForTest as Duration;
+    expect((after - before).abs(), lessThan(const Duration(milliseconds: 50)));
+
+    // 300ms 内把误差追平。
+    await tester.pump(const Duration(milliseconds: 300));
+    final Duration caughtUp = state.clockForTest as Duration;
+    expect(caughtUp, greaterThanOrEqualTo(const Duration(milliseconds: 580)));
+  });
+
   testWidgets('没有弹幕时不构建绘制层', (WidgetTester tester) async {
     final ValueNotifier<Duration> position = ValueNotifier<Duration>(
       Duration.zero,
