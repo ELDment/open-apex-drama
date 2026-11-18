@@ -37,6 +37,7 @@ class _FeedMedia {
     required this.controller,
     required this.bundle,
     required this.stream,
+    required this.episodeCount,
   });
 
   final String dramaId;
@@ -44,6 +45,7 @@ class _FeedMedia {
   final VideoController controller;
   final PlaybackBundle bundle;
   final StreamInfo stream;
+  final int episodeCount;
 
   /// 首帧渲染完成前，页面继续盖封面，避免黑屏。
   bool ready = false;
@@ -282,6 +284,7 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
         controller: controller,
         bundle: bundle,
         stream: stream,
+        episodeCount: episodes.length,
       );
     } catch (_) {
       try {
@@ -384,11 +387,35 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
   }
 
   Future<void> _openFull(Drama drama) async {
+    // 真实 feed 的 Drama.episodes 常为 0；用已解析到的分集数补齐，
+    // 否则 openPlayer 会把它当成未开播直接拦截。
+    final int count = _current?.episodeCount ?? drama.episodes;
+    final Drama target = count > 0 && count != drama.episodes
+        ? _withEpisodeCount(drama, count)
+        : drama;
     unawaited(_current?.player.pause());
-    await openPlayer(context, drama);
+    await openPlayer(context, target);
     if (mounted && widget.active) {
       unawaited(_current?.player.play());
     }
+  }
+
+  Drama _withEpisodeCount(Drama drama, int count) {
+    return Drama(
+      id: drama.id,
+      title: drama.title,
+      kind: drama.kind,
+      category: drama.category,
+      tags: drama.tags,
+      episodes: count,
+      rating: drama.rating,
+      viewers: drama.viewers,
+      description: drama.description,
+      coverColors: drama.coverColors,
+      coverUrl: drama.coverUrl,
+      episodeTitles: drama.episodeTitles,
+      badge: drama.badge,
+    );
   }
 
   void _toggleMute() {
@@ -482,6 +509,7 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
                     : (_next?.dramaId == drama.id ? _next : null);
                 return WatchFeedPage(
                   drama: drama,
+                  episodeCount: media?.episodeCount ?? drama.episodes,
                   player: media?.player,
                   controller: media?.controller,
                   ready: media?.ready ?? false,

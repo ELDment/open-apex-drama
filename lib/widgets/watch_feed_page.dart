@@ -12,6 +12,7 @@ class WatchFeedPage extends StatelessWidget {
   const WatchFeedPage({
     super.key,
     required this.drama,
+    required this.episodeCount,
     required this.player,
     required this.controller,
     required this.ready,
@@ -21,6 +22,9 @@ class WatchFeedPage extends StatelessWidget {
   });
 
   final Drama drama;
+
+  /// 真实 feed 的 Drama.episodes 常为 0，用解析到的分集数展示。
+  final int episodeCount;
   final Player? player;
   final VideoController? controller;
 
@@ -29,6 +33,14 @@ class WatchFeedPage extends StatelessWidget {
   final bool isLast;
   final VoidCallback onTogglePlay;
   final VoidCallback onOpenFull;
+
+  /// 真实 feed 的 tags 常只有频道名（如「推荐」），过滤掉避免重复。
+  String get _tags => drama.tags
+      .where(
+        (String tag) =>
+            tag.isNotEmpty && tag != '推荐' && tag != drama.category,
+      )
+      .join(' · ');
 
   @override
   Widget build(BuildContext context) {
@@ -130,8 +142,8 @@ class WatchFeedPage extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  drama.episodes > 0
-                      ? '全${drama.episodes}集 · ${drama.category}'
+                  episodeCount > 0
+                      ? '全$episodeCount集 · ${drama.category}'
                       : drama.category,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -141,17 +153,19 @@ class WatchFeedPage extends StatelessWidget {
                     color: Colors.white.withValues(alpha: 0.72),
                   ),
                 ),
-                const SizedBox(height: 5),
-                Text(
-                  drama.tags.join(' · '),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    height: 1.3,
-                    color: Colors.white.withValues(alpha: 0.52),
+                if (_tags.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 5),
+                  Text(
+                    _tags,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      height: 1.3,
+                      color: Colors.white.withValues(alpha: 0.52),
+                    ),
                   ),
-                ),
+                ],
                 const SizedBox(height: 10),
                 Text(
                   drama.description,
