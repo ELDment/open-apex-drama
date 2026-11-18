@@ -33,10 +33,12 @@ Future<void> openPlayer(
   BuildContext context,
   Drama drama, {
   int episodeNumber = 1,
+  bool assumePlayable = false,
 }) async {
   // 预约中 / 未开播的剧集没有分集，分集接口会返回空结果，SDK 会把它当成
   // 「匿名设备受限」报错（实测多季剧的新一季显示"全0集"）。在这里直接拦住。
-  if (drama.episodes <= 0) {
+  // 看剧流已经实际播放过第一集，可使用 assumePlayable 跳过该兜底。
+  if (!assumePlayable && drama.episodes <= 0) {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(const SnackBar(content: Text('该剧暂未开播，敬请期待')));

@@ -64,7 +64,11 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
   static const HomeFeedKey _feedKey = HomeFeedKey('推荐');
 
   final PageController _controller = PageController();
-  List<Drama> _feed = const <Drama>[];
+  List<Drama> _feed = mockDramas;
+  String _cursor = '';
+  bool _hasMore = false;
+  bool _initialized = false;
+  bool _loadingMore = false;
   _FeedMedia? _current;
   _FeedMedia? _next;
   int _index = 0;
@@ -210,6 +214,9 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
     }
     final int nextIndex = _index + 1;
     if (nextIndex < 0 || nextIndex >= _feed.length) {
+      if (nextIndex >= _feed.length) {
+        unawaited(_loadMore());
+      }
       return;
     }
     final Drama next = _feed[nextIndex];
@@ -252,6 +259,39 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
     await old?.dispose();
     if (mounted) {
       setState(() {});
+    }
+  }
+
+  /// 自动翻页：游标来自上一页，追加去重后的新推荐。
+  Future<void> _loadMore() async {
+    if (_loadingMore || !_hasMore || _cursor.isEmpty) {
+      return;
+    }
+    _loadingMore = true;
+    try {
+      final HomeFeed next = await ref.read(
+        homeFeedProvider(HomeFeedKey('推荐', _cursor)).future,
+      );
+      if (!mounted) {
+        return;
+      }
+      final Set<String> known = _feed.map((Drama d) => d.id).toSet();
+      final List<Drama> more = next.items
+          .where((Drama d) => !known.contains(d.id))
+          .toList(growable: false);
+      if (more.isEmpty && next.cursor == _cursor) {
+        _hasMore = false;
+        return;
+      }
+      setState(() {
+        _feed = <Drama>[..._feed, ...more];
+        _cursor = next.cursor;
+        _hasMore = next.hasMore;
+      });
+    } catch (_) {
+      // 下一页失败不影响已加载内容，继续滑动可再次触发。
+    } finally {
+      _loadingMore = false;
     }
   }
 
@@ -342,6 +382,10 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
     if (!widget.active) {
       return;
     }
+    // 接近列表尾部时自动取下一页推荐，形成无限刷。
+    if (index >= _feed.length - 2) {
+      unawaited(_loadMore());
+    }
     final Drama drama = _feed[index];
     final _FeedMedia? promoted = _next;
     if (promoted != null &&
@@ -394,7 +438,7 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
         ? _withEpisodeCount(drama, count)
         : drama;
     unawaited(_current?.player.pause());
-    await openPlayer(context, target);
+    await openPlayer(context, target, assumePlayable: true);
     if (mounted && widget.active) {
       unawaited(_current?.player.play());
     }
@@ -430,6 +474,11 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
     _current = null;
     _next = null;
     _failed.clear();
+    _initialized = false;
+    _feed = mockDramas;
+    _cursor = '';
+    _hasMore = false;
+    _loadingMore = false;
     unawaited(oldCurrent?.dispose());
     unawaited(oldNext?.dispose());
     _index = 0;
@@ -457,6 +506,11 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
         _current = null;
         _next = null;
         _failed.clear();
+        _initialized = false;
+        _feed = mockDramas;
+        _cursor = '';
+        _hasMore = false;
+        _loadingMore = false;
         unawaited(oldCurrent?.dispose());
         unawaited(oldNext?.dispose());
       }
@@ -465,11 +519,15 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
     final AsyncValue<HomeFeed> feedAsync = ref.watch(
       homeFeedProvider(_feedKey),
     );
+    final HomeFeed? first = feedAsync.value;
+    if (!_initialized && first != null) {
+      _initialized = true;
+      _feed = first.items.isEmpty ? mockDramas : first.items;
+      _cursor = first.items.isEmpty ? '' : first.cursor;
+      _hasMore = first.items.isEmpty ? false : first.hasMore;
+    }
     // 降级 mock 数据的 id 对真实 SDK 无效，只展示封面，不自动解析。
-    _autoplayAllowed =
-        feedAsync.value != null && !(feedAsync.value?.isFallback ?? false);
-    final List<Drama> fetched = feedAsync.value?.items ?? const <Drama>[];
-    _feed = fetched.isEmpty ? mockDramas : fetched;
+    _autoplayAllowed = first != null && !first.isFallback;
     final int total = _feed.length;
     if (total == 0) {
       return const ColoredBox(
@@ -479,7 +537,6 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
         ),
       );
     }
-    final int index = _index.clamp(0, total - 1);
     _scheduleEnsureCurrent();
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
@@ -519,51 +576,59 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
                 );
               },
             ),
-            SafeArea(
-              bottom: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(18, 6, 4, 0),
-                child: Row(
-                  children: <Widget>[
-                    const Text(
-                      '推荐',
-                      style: TextStyle(
-                        fontSize: 18,
-                        height: 1.2,
-                        fontWeight: FontWeight.w800,
-                        color: Colors.white,
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                bottom: false,
+                child: SizedBox(
+                  height: 44,
+                  child: Stack(
+                    children: <Widget>[
+                      const Center(
+                        child: Text(
+                          '推荐',
+                          style: TextStyle(
+                            fontSize: 18,
+                            height: 1.2,
+                            fontWeight: FontWeight.w800,
+                            color: Colors.white,
+                          ),
+                        ),
                       ),
-                    ),
-                    const Spacer(),
-                    Text(
-                      '${index + 1} / $total',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        height: 1.2,
-                        color: Colors.white.withValues(alpha: 0.68),
+                      Positioned(
+                        right: 4,
+                        top: 0,
+                        bottom: 0,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            IconButton(
+                              tooltip: _muted ? '取消静音' : '静音',
+                              onPressed: _toggleMute,
+                              icon: Icon(
+                                _muted
+                                    ? Icons.volume_off_rounded
+                                    : Icons.volume_up_rounded,
+                                size: 21,
+                                color: Colors.white,
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: '换一批',
+                              onPressed: _shuffle,
+                              icon: const Icon(
+                                Icons.refresh_rounded,
+                                size: 22,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                    IconButton(
-                      tooltip: _muted ? '取消静音' : '静音',
-                      onPressed: _toggleMute,
-                      icon: Icon(
-                        _muted
-                            ? Icons.volume_off_rounded
-                            : Icons.volume_up_rounded,
-                        size: 21,
-                        color: Colors.white,
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: '换一批',
-                      onPressed: _shuffle,
-                      icon: const Icon(
-                        Icons.refresh_rounded,
-                        size: 22,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
