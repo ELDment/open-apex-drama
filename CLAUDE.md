@@ -103,9 +103,12 @@ providers/data_providers.dart ──watch(dataModeProvider)──▶  data/repos
 
 ## 更新与发版（摘要，详见 AGENTS.md）
 
-- 应用内更新读 `api.github.com/repos/Sxuan-Coder/open-apex-drama/releases/latest`
-  （`services/update_service.dart`）。仓库标识同时硬编码在 `app_state/project_info.dart`，
-  改仓库需两处同步。
+- 应用内更新先读 `api.github.com/repos/Sxuan-Coder/open-apex-drama/releases/latest`；失败
+  （403/网络）时读 `updates.json` 的国内镜像（xget → jsDelivr → raw），再按发布命名
+  拼资产地址（`services/update_manifest.dart`）。启动后后台测速三个下载镜像
+  （512KB 探针，结果缓存 6 小时），下载按实测顺序从快到慢尝试；默认 gh-proxy →
+  xget → ghfast.top → 官方直链。仓库标识同时硬编码在
+  `app_state/project_info.dart`，改仓库需两处同步。
 - `update_service` 按文件名筛选 Release 资产：`ApexDrama-v<ver>-arm64-v8a.apk`、
   `-armeabi-v7a.apk`、`ApexDrama-<ver>-windows-x64-setup.exe`、`-windows-x64.zip`。命名不符会回退到 Release 页面。
 - 版本号只认 tag：`buildNumber = major*100 + minor*10 + patch`，patch 为单数字；

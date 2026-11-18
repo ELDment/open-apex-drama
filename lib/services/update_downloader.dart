@@ -3,25 +3,23 @@ import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
 
+import 'update_mirror_probe.dart';
+import 'update_mirrors.dart';
+
 /// 应用内下载更新包。
 ///
-/// GitHub 直连在国内不稳定：按中转站优先级逐个尝试（[mirrors] 前缀拼
-/// 完整原始 URL，均为常见 GitHub 加速代理），全部失败回退官方直链；
-/// 仍失败则返回 null，由调用方降级为打开网页下载。
+/// 启动后 [UpdateMirrorProbe] 会在后台测速三个镜像；下载时按测速结果
+/// 从快到慢逐个尝试，全部失败回退官方直链；仍失败则返回 null，由调用方
+/// 降级为打开网页下载。
+///
+/// 镜像格式见 [UpdateMirrors]。
 class UpdateDownloader {
   const UpdateDownloader._();
 
-  /// GitHub 国内中转站（前缀 + 完整 GitHub URL 的拼装格式）。
-  static const List<String> mirrors = <String>[
-    'https://ghfast.top/',
-    'https://gh-proxy.com/',
-  ];
-
-  /// 下载候选 URL：中转站优先，官方直链殿后。
-  static List<String> candidateUrls(String assetUrl) => <String>[
-        for (final String mirror in mirrors) '$mirror$assetUrl',
-        assetUrl,
-      ];
+  /// 下载候选 URL：按 [order]（测速顺序）排列，官方直链始终最后。
+  static List<String> candidateUrls(String assetUrl, {List<String>? order}) {
+    return UpdateMirrors.candidates(assetUrl, order: order);
+  }
 
   /// 流式下载到临时目录，成功返回文件完整路径。
   ///
@@ -33,8 +31,10 @@ class UpdateDownloader {
     String? fileName,
     void Function(double progress)? onProgress,
     HttpClient? client,
+
     /// 测试注入用；默认系统临时目录。
     Directory? directory,
+
     /// 测试注入用；默认中转站 + 官方直链（见 [candidateUrls]）。
     List<String>? urls,
   }) async {
@@ -52,7 +52,9 @@ class UpdateDownloader {
       return savePath;
     }
 
-    for (final String url in urls ?? candidateUrls(assetUrl)) {
+    final List<String>? order =
+        urls == null ? await UpdateMirrorProbe.preferredOrder() : null;
+    for (final String url in urls ?? candidateUrls(assetUrl, order: order)) {
       final String? result = await _tryDownload(
         url,
         savePath,
@@ -80,8 +82,8 @@ class UpdateDownloader {
       request.headers.set(HttpHeaders.userAgentHeader, 'ApexDrama-App');
       request.followRedirects = true;
       final HttpClientResponse response = await request.close().timeout(
-            const Duration(seconds: 20),
-          );
+        const Duration(seconds: 20),
+      );
       if (response.statusCode != HttpStatus.ok) {
         await response.drain<void>().catchError((Object _) => response);
         return null;

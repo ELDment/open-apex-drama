@@ -61,4 +61,40 @@ void main() {
     expect(path, isNull);
     expect(tempDir.listSync(), isEmpty);
   });
+
+  group('candidateUrls', () {
+    test('GitHub 资产：gh-proxy → xget → ghfast → 官方直链', () {
+      const String asset =
+          'https://github.com/o/r/releases/download/v1.5.0/ApexDrama-v1.5.0-arm64-v8a.apk';
+      expect(UpdateDownloader.candidateUrls(asset), <String>[
+        'https://gh-proxy.com/$asset',
+        'https://xget.xi-xu.me/gh/o/r/releases/download/v1.5.0/ApexDrama-v1.5.0-arm64-v8a.apk',
+        'https://ghfast.top/$asset',
+        asset,
+      ]);
+    });
+
+    test('非 GitHub 地址不拼 xget，只保留前缀中转与直链', () {
+      const String asset = 'https://example.com/ApexDrama.apk';
+      expect(UpdateDownloader.candidateUrls(asset), <String>[
+        'https://gh-proxy.com/$asset',
+        'https://ghfast.top/$asset',
+        asset,
+      ]);
+    });
+
+    test('按测速顺序生成候选，未列出的镜像补在末尾', () {
+      const String asset =
+          'https://github.com/o/r/releases/download/v1.5.0/ApexDrama-v1.5.0-arm64-v8a.apk';
+      expect(
+        UpdateDownloader.candidateUrls(asset, order: <String>['gh-proxy']),
+        <String>[
+          'https://gh-proxy.com/$asset',
+          'https://xget.xi-xu.me/gh/o/r/releases/download/v1.5.0/ApexDrama-v1.5.0-arm64-v8a.apk',
+          'https://ghfast.top/$asset',
+          asset,
+        ],
+      );
+    });
+  });
 }

@@ -14,9 +14,9 @@ import 'update_service.dart';
 /// 走 [silent]：失败、已是最新都静默，只有发现新版才弹窗。
 ///
 /// 弹窗提供两种更新方式：
-/// - 直连下载：应用内经 GitHub 国内中转链下载（ghfast.top →
-///   gh-proxy.com → 官方直链，见 [UpdateDownloader]），全部失败自动
-///   回退网页下载；
+/// - 直连下载：应用内经国内中转链下载（启动后后台测速，按最快顺序；
+///   默认 gh-proxy → xget → ghfast.top → 官方直链，见
+///   [UpdateDownloader]），全部失败自动回退网页下载；
 /// - 网页下载：打开浏览器到下载页（原行为）。
 class UpdatePrompt {
   const UpdatePrompt._();

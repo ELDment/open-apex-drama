@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'update_manifest.dart';
+
 /// GitHub Release 检查更新。
 ///
 /// Release 仓库（公开）：Sxuan-Coder/open-apex-drama——存放各平台安装包
@@ -22,6 +24,12 @@ class UpdateService {
   /// 不再发请求。
   static const Duration _cacheWindow = Duration(minutes: 10);
 
+  /// 官方 API 与镜像清单的请求上限：失败要尽快落到兜底路径，不能让
+  /// 启动检查长时间挂着。
+  static const Duration _apiTimeout = Duration(seconds: 8);
+  static const Duration _manifestTimeout = Duration(seconds: 8);
+  static const int _maxManifestBytes = 512 * 1024;
+
   static const String _cCheckedAt = 'update.checkedAt';
   static const String _cVersion = 'update.version';
   static const String _cNotes = 'update.notes';
@@ -39,25 +47,68 @@ class UpdateService {
   static Future<UpdateInfo?> check(
     String currentVersion, {
     bool useCache = true,
+
+    /// 测试注入用；默认官方 latest API。
+    String? apiUrl,
+
+    /// 测试注入用；默认 [UpdateManifest.urls]。
+    List<String>? manifestUrls,
   }) async {
     if (useCache) {
       final UpdateInfo? cached = await _readCache(currentVersion);
       if (cached != null) {
         return cached;
       }
-      final bool? cachedNoUpdate = await _readCacheSaysLatest();
+      final bool? cachedNoUpdate = await _readCacheSaysLatest(currentVersion);
       if (cachedNoUpdate == true) {
         return null;
       }
     }
-    final HttpClient client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 10);
+
+    // 官方 API 优先：数据最新，且能按资产名精确挑包。失败（网络不可达、
+    // 403 限流、5xx）时改读国内镜像上的 updates.json，避免国内用户
+    // 卡在「检查失败」。
     try {
-      final HttpClientRequest request =
-          await client.getUrl(Uri.parse(_latestUrl));
-      request.headers.set(HttpHeaders.acceptHeader, 'application/vnd.github+json');
+      return await _checkViaApi(currentVersion, apiUrl ?? _latestUrl);
+    } on UpdateException {
+      final (bool reached, UpdateInfo? info) = await _checkViaManifest(
+        currentVersion,
+        manifestUrls: manifestUrls,
+      );
+      if (reached) {
+        return info;
+      }
+      rethrow;
+    } catch (_) {
+      final (bool reached, UpdateInfo? info) = await _checkViaManifest(
+        currentVersion,
+        manifestUrls: manifestUrls,
+      );
+      if (reached) {
+        return info;
+      }
+      throw const UpdateException('网络异常，请稍后重试');
+    }
+  }
+
+  /// 官方 GitHub API 检查。404 视为仓库暂无 release，直接返回 null。
+  static Future<UpdateInfo?> _checkViaApi(
+    String currentVersion,
+    String apiUrl,
+  ) async {
+    final HttpClient client = HttpClient()..connectionTimeout = _apiTimeout;
+    try {
+      final HttpClientRequest request = await client
+          .getUrl(Uri.parse(apiUrl))
+          .timeout(_apiTimeout);
+      request.headers.set(
+        HttpHeaders.acceptHeader,
+        'application/vnd.github+json',
+      );
       request.headers.set(HttpHeaders.userAgentHeader, 'ApexDrama-App');
-      final HttpClientResponse response = await request.close();
+      final HttpClientResponse response = await request.close().timeout(
+        _apiTimeout,
+      );
       // 404：仓库还没有任何 release——正常路径，不算错误。
       if (response.statusCode == HttpStatus.notFound) {
         return null;
@@ -69,13 +120,18 @@ class UpdateService {
       if (response.statusCode != HttpStatus.ok) {
         throw UpdateException('服务返回 ${response.statusCode}');
       }
-      final Map<String, dynamic> json = jsonDecode(
-        await response.transform(utf8.decoder).join(),
-      ) as Map<String, dynamic>;
+      final String body = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(_apiTimeout);
+      final Map<String, dynamic> json =
+          jsonDecode(body) as Map<String, dynamic>;
 
       final String tag = (json['tag_name'] as String?)?.trim() ?? '';
       final String latest = tag.replaceFirst(RegExp('^v'), '');
-      final bool newer = latest.isNotEmpty && _isNewer(latest, currentVersion);
+      final bool newer =
+          latest.isNotEmpty &&
+          UpdateManifest.isNewerVersion(latest, currentVersion);
       final UpdateInfo info = UpdateInfo(
         version: latest,
         notes: (json['body'] as String?)?.trim() ?? '',
@@ -84,10 +140,103 @@ class UpdateService {
       );
       await _writeCache(info, newer: newer);
       return newer ? info : null;
-    } on UpdateException {
-      rethrow;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// 国内兜底：从镜像读取 `updates.json`。
+  ///
+  /// 返回 `(是否读到清单, 可更新信息)`。清单可达但版本不比当前新时，
+  /// 第二项为 null——这是正常结果，不应再抛错。
+  static Future<(bool, UpdateInfo?)> _checkViaManifest(
+    String currentVersion, {
+    List<String>? manifestUrls,
+  }) async {
+    final Map<String, dynamic>? json = await _fetchManifest(manifestUrls);
+    if (json == null) {
+      return (false, null);
+    }
+    final UpdateManifestEntry? entry = UpdateManifest.latest(json);
+    if (entry == null) {
+      return (true, null);
+    }
+    final bool windows = Platform.isWindows;
+    final bool newer = UpdateManifest.isNewerVersion(
+      entry.version,
+      currentVersion,
+    );
+    final UpdateInfo info = UpdateInfo(
+      version: entry.version,
+      notes: entry.notes,
+      downloadUrl:
+          entry.downloadFor(windows: windows) ??
+          UpdateManifest.assetUrl(
+            owner: _owner,
+            repo: _repo,
+            version: entry.version,
+            windows: windows,
+          ),
+      publishedAt: entry.publishedAt,
+    );
+    await _writeCache(info, newer: newer);
+    return (true, newer ? info : null);
+  }
+
+  /// 按顺序尝试清单镜像：xget 最新鲜且国内通常最快，失败再退到
+  /// jsDelivr / raw。
+  ///
+  /// 不用并发抢答：jsDelivr 的 `@master` 有缓存，先返回的可能是旧清单，
+  /// 会漏掉刚发布的版本。
+  static Future<Map<String, dynamic>?> _fetchManifest(
+    List<String>? injectedUrls,
+  ) async {
+    final List<String> urls =
+        injectedUrls ?? UpdateManifest.urls(owner: _owner, repo: _repo);
+    for (final String url in urls) {
+      final Map<String, dynamic>? json = await _fetchJson(url);
+      if (json != null) {
+        return json;
+      }
+    }
+    return null;
+  }
+
+  /// 单个清单地址：6s 连接、8s 读超时；非 200 / 非 JSON / 过大都算失败。
+  static Future<Map<String, dynamic>?> _fetchJson(String url) async {
+    final HttpClient client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 6);
+    try {
+      final HttpClientRequest request = await client
+          .getUrl(Uri.parse(url))
+          .timeout(_manifestTimeout);
+      request.headers.set(HttpHeaders.userAgentHeader, 'ApexDrama-App');
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      final HttpClientResponse response = await request.close().timeout(
+        _manifestTimeout,
+      );
+      if (response.statusCode != HttpStatus.ok) {
+        await response.drain<void>().catchError((Object _) => response);
+        return null;
+      }
+      if (response.contentLength > _maxManifestBytes) {
+        await response.drain<void>().catchError((Object _) => response);
+        return null;
+      }
+      final String body = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(_manifestTimeout);
+      final Object? decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+      if (decoded is Map) {
+        return decoded.cast<String, dynamic>();
+      }
+      return null;
     } catch (_) {
-      throw UpdateException('网络异常，请稍后重试');
+      return null;
     } finally {
       client.close(force: true);
     }
@@ -115,24 +264,37 @@ class UpdateService {
       return null;
     }
     final String version = prefs.getString(_cVersion) ?? '';
-    if (version.isEmpty || !_isNewer(version, currentVersion)) {
+    final String url = prefs.getString(_cUrl) ?? '';
+    // 「已是最新」缓存只写版本号、不写下载地址。不能把它当成可更新
+    // 结果：用户降级后旧版本号仍大于当前版本，会弹出一个没有下载地址
+    // 的假更新。
+    if (version.isEmpty ||
+        url.isEmpty ||
+        !UpdateManifest.isNewerVersion(version, currentVersion)) {
       return null;
     }
     return UpdateInfo(
       version: version,
       notes: prefs.getString(_cNotes) ?? '',
-      downloadUrl: prefs.getString(_cUrl) ?? _releasePageUrl(),
+      downloadUrl: url,
       publishedAt: DateTime.tryParse(prefs.getString(_cPublishedAt) ?? ''),
     );
   }
 
   /// 读缓存：窗口内上次检查判定「已是最新」时返回 true。
-  static Future<bool?> _readCacheSaysLatest() async {
+  ///
+  /// 缓存版本比当前版本新时不能算数：这是更高版本写下的标记（用户
+  /// 降级或运行测试包），对当前版本应重新检查。
+  static Future<bool?> _readCacheSaysLatest(String currentVersion) async {
     final SharedPreferences prefs = await SharedPreferences.getInstance();
     if (!_isFresh(prefs)) {
       return null;
     }
-    return prefs.getString(_cVersion) != null;
+    final String version = prefs.getString(_cVersion) ?? '';
+    if (version.isEmpty) {
+      return null;
+    }
+    return !UpdateManifest.isNewerVersion(version, currentVersion);
   }
 
   static bool _isFresh(SharedPreferences prefs) {
@@ -225,30 +387,8 @@ class UpdateService {
     return any ?? _releasePageUrl();
   }
 
-  static String _releasePageUrl() => 'https://github.com/$_owner/$_repo/releases/latest';
-
-  /// 语义化版本比较：逐段数字比较，段数不足补 0。
-  /// 1.10 > 1.9；1.0.1 > 1.0；非法字符按 0 处理。
-  static bool _isNewer(String candidate, String current) {
-    final List<int> a = _versionSegments(candidate);
-    final List<int> b = _versionSegments(current);
-    final int len = a.length > b.length ? a.length : b.length;
-    for (int i = 0; i < len; i++) {
-      final int x = i < a.length ? a[i] : 0;
-      final int y = i < b.length ? b[i] : 0;
-      if (x != y) {
-        return x > y;
-      }
-    }
-    return false;
-  }
-
-  static List<int> _versionSegments(String version) {
-    return version
-        .split('.')
-        .map((String part) => int.tryParse(part.trim()) ?? 0)
-        .toList();
-  }
+  static String _releasePageUrl() =>
+      'https://github.com/$_owner/$_repo/releases/latest';
 }
 
 /// 可用的更新信息。

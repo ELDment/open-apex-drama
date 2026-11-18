@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../providers/sync_providers.dart';
+import '../services/update_mirror_probe.dart';
 import '../services/update_prompt.dart';
 import '../theme/app_colors.dart';
 import '../widgets/app_bottom_nav.dart';
@@ -61,6 +64,8 @@ class _AppShellState extends ConsumerState<AppShell> {
       if (!mounted) {
         return;
       }
+      // 后台测速下载镜像，不阻塞启动和更新检查；结果供后续下载排序。
+      unawaited(UpdateMirrorProbe.warmUp(currentVersion: info.version));
       await UpdatePrompt.check(context, currentVersion: info.version, silent: true);
     } catch (_) {
       // 插件未注册（测试环境）等情况：静默跳过。
