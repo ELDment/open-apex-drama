@@ -24,6 +24,7 @@ import 'package:apexduanju/screens/rank_screen.dart';
 import 'package:apexduanju/screens/recent_updates_screen.dart';
 import 'package:apexduanju/screens/search_screen.dart';
 import 'package:apexduanju/screens/settings_screen.dart';
+import 'package:apexduanju/screens/watch_feed_screen.dart';
 import 'package:apexduanju/theme/app_theme.dart';
 import 'package:apexduanju/widgets/drama_card.dart';
 import 'package:apexduanju/widgets/soft_chip.dart';
@@ -704,6 +705,20 @@ void main() {
     );
     expect(find.text('热播榜'), findsOneWidget);
     expect(find.text('1'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('watch feed renders the first drama and a play CTA', (
+    WidgetTester tester,
+  ) async {
+    await pumpScreen(
+      tester,
+      const Scaffold(body: WatchFeedScreen()),
+      size: const Size(390, 844),
+    );
+
+    expect(find.textContaining('看全集'), findsWidgets);
+    expect(find.text('推荐'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

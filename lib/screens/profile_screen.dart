@@ -17,6 +17,7 @@ import 'downloads_screen.dart';
 import 'following_screen.dart';
 import 'membership_screen.dart';
 import 'placeholder_screen.dart';
+import 'rank_screen.dart';
 import 'settings_screen.dart';
 
 /// 会员体系暂未上线：先隐藏「开通会员」入口。
@@ -566,6 +567,16 @@ class _MenuPanel extends StatelessWidget {
             title: '我的收藏',
             iconSize: 21,
             onTap: () => onOpenFollowing(FollowingTab.favorites),
+          ),
+          SettingTile(
+            icon: Icons.emoji_events_outlined,
+            title: '榜单',
+            iconSize: 21,
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (BuildContext _) => const RankScreen(),
+              ),
+            ),
           ),
           SettingTile(
             icon: Icons.download_for_offline_outlined,

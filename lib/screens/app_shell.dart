@@ -11,7 +11,7 @@ import 'category_screen.dart';
 import 'following_screen.dart';
 import 'home_screen.dart';
 import 'profile_screen.dart';
-import 'rank_screen.dart';
+import 'watch_feed_screen.dart';
 
 class AppShell extends ConsumerStatefulWidget {
   const AppShell({super.key});
@@ -112,7 +112,7 @@ class _AppShellState extends ConsumerState<AppShell> {
             children: <Widget>[
               const HomeScreen(),
               const CategoryScreen(),
-              const RankScreen(),
+              const WatchFeedScreen(),
               FollowingScreen(
                 selectedTab: _followingTab,
                 onTabChanged: (FollowingTab tab) =>

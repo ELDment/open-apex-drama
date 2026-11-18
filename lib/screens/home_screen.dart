@@ -15,6 +15,7 @@ import '../widgets/page_layout.dart';
 import '../widgets/poster_artwork.dart';
 import '../widgets/section_header.dart';
 import 'drama_detail_screen.dart';
+import 'rank_screen.dart';
 import 'recent_updates_screen.dart';
 import 'search_screen.dart';
 
@@ -81,6 +82,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     openSearch(context);
   }
 
+  void _openRank() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext _) => const RankScreen(),
+      ),
+    );
+  }
+
   void _openUpdates() {
     openRecentUpdates(context);
   }
@@ -120,6 +129,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     _rotation = 0;
                   }),
                   onSearch: _onSearch,
+                  onRank: _openRank,
                 ),
               ),
             ),
@@ -322,11 +332,13 @@ class _HomeTopBar extends StatelessWidget {
     required this.selectedIndex,
     required this.onSelect,
     required this.onSearch,
+    required this.onRank,
   });
 
   final int selectedIndex;
   final ValueChanged<int> onSelect;
   final VoidCallback onSearch;
+  final VoidCallback onRank;
 
   @override
   Widget build(BuildContext context) {
@@ -351,6 +363,14 @@ class _HomeTopBar extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 4),
+        AppIconButton(
+          icon: Icons.emoji_events_outlined,
+          tooltip: '榜单',
+          onPressed: onRank,
+          size: 38,
+          iconSize: 21,
+          plain: true,
+        ),
         AppIconButton(
           icon: Icons.search_rounded,
           tooltip: '搜索',

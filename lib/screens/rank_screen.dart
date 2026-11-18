@@ -6,6 +6,7 @@ import '../providers/data_providers.dart';
 import '../theme/app_colors.dart';
 import '../widgets/ambient_glow.dart';
 import '../widgets/empty_state.dart';
+import '../widgets/page_header.dart';
 import '../widgets/page_layout.dart';
 import '../widgets/poster_artwork.dart';
 import '../widgets/underline_tabs.dart';
@@ -67,55 +68,60 @@ class _RankScreenState extends ConsumerState<RankScreen> {
       _tabs = pageTabs;
     }
 
-    return AmbientGlow(
-      child: SafeArea(
-        bottom: false,
-        child: CustomScrollView(
-          slivers: <Widget>[
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(horizontal, 12, horizontal, 2),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text(
-                      '榜单',
-                      style: TextStyle(
-                        fontSize: 26,
-                        height: 1.2,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.2,
-                        color: colors.textPrimary,
+    return Scaffold(
+      backgroundColor: colors.page,
+      body: AmbientGlow(
+        child: Column(
+          children: <Widget>[
+            const PageHeader(title: '榜单'),
+            Expanded(
+              child: SafeArea(
+                top: false,
+                bottom: false,
+                child: CustomScrollView(
+                  slivers: <Widget>[
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          horizontal,
+                          8,
+                          horizontal,
+                          2,
+                        ),
+                        child: Text(
+                          '全站热播 · 每小时更新',
+                          style: TextStyle(
+                            fontSize: 12,
+                            height: 1.3,
+                            color: colors.textSecondary,
+                          ),
+                        ),
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      '全站热播 · 每小时更新',
-                      style: TextStyle(
-                        fontSize: 12,
-                        height: 1.3,
-                        color: colors.textSecondary,
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          horizontal,
+                          12,
+                          horizontal,
+                          0,
+                        ),
+                        child: _tabs.isEmpty
+                            ? const _SkeletonTabs()
+                            : UnderlineTabs(
+                                labels: <String>[
+                                  for (final RankTab tab in _tabs) tab.label,
+                                ],
+                                selectedIndex: _tabIndex,
+                                onChanged: _onTabChanged,
+                              ),
                       ),
                     ),
+                    ..._bodySlivers(pageAsync, horizontal),
                   ],
                 ),
               ),
             ),
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(horizontal, 12, horizontal, 0),
-                child: _tabs.isEmpty
-                    ? const _SkeletonTabs()
-                    : UnderlineTabs(
-                        labels: <String>[
-                          for (final RankTab tab in _tabs) tab.label,
-                        ],
-                        selectedIndex: _tabIndex,
-                        onChanged: _onTabChanged,
-                      ),
-              ),
-            ),
-            ..._bodySlivers(pageAsync, horizontal),
           ],
         ),
       ),
@@ -198,10 +204,8 @@ class _RankScreenState extends ConsumerState<RankScreen> {
                       child: j < entries.length
                           ? _RankRow(
                               entry: entries[j],
-                              onTap: () => openDramaDetail(
-                                context,
-                                entries[j].drama,
-                              ),
+                              onTap: () =>
+                                  openDramaDetail(context, entries[j].drama),
                             )
                           : const SizedBox.shrink(),
                     ),

@@ -31,7 +31,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('为你推荐'), findsOneWidget);
-    for (final String label in <String>['首页', '分类', '榜单', '追剧', '我的']) {
+    for (final String label in <String>['首页', '分类', '看剧', '追剧', '我的']) {
       expect(find.text(label), findsOneWidget);
     }
 
@@ -51,10 +51,9 @@ void main() {
     await tester.tap(find.text('全部'));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('榜单'));
+    await tester.tap(find.text('看剧'));
     await tester.pumpAndSettle();
-    expect(find.text('全站热播 · 每小时更新'), findsOneWidget);
-    expect(find.text('热播榜'), findsOneWidget);
+    expect(find.textContaining('看全集'), findsWidgets);
 
     await tester.tap(find.text('追剧'));
     await tester.pumpAndSettle();
@@ -107,7 +106,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('榜单'));
+    // 榜单已降为子页面：从首页右上角的榜单入口进入。
+    await tester.tap(find.byTooltip('榜单'));
     await tester.pumpAndSettle();
     // Tab 来自 RankPage.tabs，默认选中 selected==true 的「热播榜」。
     expect(find.text('热播榜'), findsOneWidget);

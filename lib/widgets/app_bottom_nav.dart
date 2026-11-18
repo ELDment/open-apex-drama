@@ -33,9 +33,9 @@ class AppBottomNav extends StatelessWidget {
       selectedIcon: Icons.grid_view_rounded,
     ),
     AppNavEntry(
-      label: '榜单',
-      icon: Icons.emoji_events_outlined,
-      selectedIcon: Icons.emoji_events_rounded,
+      label: '看剧',
+      icon: Icons.play_circle_outline_rounded,
+      selectedIcon: Icons.play_circle_rounded,
     ),
     AppNavEntry(
       label: '追剧',
