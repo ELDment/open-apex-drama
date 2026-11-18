@@ -22,9 +22,9 @@
 
 ### 桌面端（Windows）
 
-| 首页 | 看剧 |
+| 首页 | 播放页 |
 |:---:|:---:|
-| ![首页](docs/screenshots/desktop-home.jpg) | ![看剧](docs/screenshots/desktop-watch.jpg) |
+| ![首页](docs/screenshots/desktop-home.jpg) | ![播放页](docs/screenshots/desktop-player.jpg) |
 
 | 详情 | 榜单 |
 |:---:|:---:|
