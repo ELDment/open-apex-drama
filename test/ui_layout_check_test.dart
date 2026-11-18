@@ -713,7 +713,7 @@ void main() {
   ) async {
     await pumpScreen(
       tester,
-      const Scaffold(body: WatchFeedScreen()),
+      const Scaffold(body: WatchFeedScreen(active: false)),
       size: const Size(390, 844),
     );
 

@@ -1,55 +1,449 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 
 import '../data/mock_data.dart';
 import '../models/drama.dart';
+import '../models/playback.dart';
+import '../player/video_output.dart';
 import '../providers/data_providers.dart';
 import '../theme/app_colors.dart';
-import '../widgets/app_pill_button.dart';
-import '../widgets/poster_artwork.dart';
-import 'drama_detail_screen.dart';
+import '../widgets/watch_feed_page.dart';
 import 'player_screen.dart';
 
-/// 「看剧」Tab：全屏竖向推荐流。
+/// 「看剧」Tab：全屏竖向推荐流，当前剧自动播放，下一部提前预加载。
 ///
-/// 当前版本先用封面 + 信息浮层做完整交互；视频预览与相邻预加载留在
-/// 下一阶段接入（匿名解析额度有限，不能在每张卡上自动 resolve）。
+/// 封面只作为加载/解析失败时的兜底；正常情况直接播放第一集。
+/// 「看全集」直接进入播放页，不经过作品详情页。
 class WatchFeedScreen extends ConsumerStatefulWidget {
-  const WatchFeedScreen({super.key});
+  const WatchFeedScreen({super.key, this.active = true});
+
+  /// 当前 Tab 是否在前台。IndexedStack 会同时构建所有 Tab，
+  /// 只有 active 时才解析/播放，避免启动即消耗解析额度。
+  final bool active;
 
   @override
   ConsumerState<WatchFeedScreen> createState() => _WatchFeedScreenState();
+}
+
+class _FeedMedia {
+  _FeedMedia({
+    required this.dramaId,
+    required this.player,
+    required this.controller,
+    required this.bundle,
+    required this.stream,
+  });
+
+  final String dramaId;
+  final Player player;
+  final VideoController controller;
+  final PlaybackBundle bundle;
+  final StreamInfo stream;
+
+  /// 首帧渲染完成前，页面继续盖封面，避免黑屏。
+  bool ready = false;
+
+  Future<void> dispose() async {
+    try {
+      await player.stop();
+    } catch (_) {}
+    try {
+      await player.dispose();
+    } catch (_) {}
+  }
 }
 
 class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
   static const HomeFeedKey _feedKey = HomeFeedKey('推荐');
 
   final PageController _controller = PageController();
+  List<Drama> _feed = const <Drama>[];
+  _FeedMedia? _current;
+  _FeedMedia? _next;
   int _index = 0;
+  int _loadToken = 0;
+  bool _loading = false;
+  bool _muted = false;
+  bool _scheduledCurrent = false;
+  bool _autoplayAllowed = false;
+
+  /// 解析失败的剧不再每帧重试，避免降级数据刷爆接口；用户点画面可手动重试。
+  final Set<String> _failed = <String>{};
 
   @override
   void dispose() {
+    _loadToken++;
+    unawaited(_current?.dispose());
+    unawaited(_next?.dispose());
     _controller.dispose();
     super.dispose();
   }
 
+  @override
+  void didUpdateWidget(covariant WatchFeedScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !oldWidget.active) {
+      final Drama? drama = _currentDrama();
+      if (drama != null) {
+        _failed.remove(drama.id);
+        unawaited(_ensureCurrent(drama));
+      }
+    } else if (!widget.active && oldWidget.active) {
+      _current?.player.pause();
+      final _FeedMedia? preload = _next;
+      _next = null;
+      unawaited(preload?.dispose());
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
+  Drama? _currentDrama() {
+    if (_feed.isEmpty) {
+      return null;
+    }
+    return _feed[_index.clamp(0, _feed.length - 1)];
+  }
+
+  void _scheduleEnsureCurrent() {
+    if (!widget.active ||
+        !_autoplayAllowed ||
+        _feed.isEmpty ||
+        _loading ||
+        _scheduledCurrent) {
+      return;
+    }
+    final Drama drama = _currentDrama()!;
+    if (_current?.dramaId == drama.id || _failed.contains(drama.id)) {
+      return;
+    }
+    _scheduledCurrent = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scheduledCurrent = false;
+      if (!mounted || !widget.active) {
+        return;
+      }
+      unawaited(_ensureCurrent(drama));
+    });
+  }
+
+  Future<void> _ensureCurrent(Drama drama) async {
+    if (!widget.active ||
+        !_autoplayAllowed ||
+        _failed.contains(drama.id)) {
+      return;
+    }
+    if (_current?.dramaId == drama.id && _current!.ready) {
+      _current!.player.setVolume(_muted ? 0 : 100);
+      _current!.player.play();
+      if (_next == null) {
+        unawaited(_preloadNext());
+      }
+      return;
+    }
+    final int token = ++_loadToken;
+    _loading = true;
+    final _FeedMedia? oldCurrent = _current;
+    final _FeedMedia? oldNext = _next;
+    _current = null;
+    _next = null;
+    if (mounted) {
+      setState(() {});
+    }
+    await oldCurrent?.dispose();
+    await oldNext?.dispose();
+
+    final _FeedMedia? media = await _prepareMedia(drama);
+    if (!mounted || token != _loadToken || !widget.active) {
+      await media?.dispose();
+      return;
+    }
+    if (media == null) {
+      _loading = false;
+      _failed.add(drama.id);
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
+    // 先把 controller 挂到页面，让 Video 进树并建立 Surface；
+    // 首帧完成前页面仍盖着封面。
+    _current = media;
+    _failed.remove(drama.id);
+    if (mounted) {
+      setState(() {});
+    }
+    final bool ok = await _openMedia(media, autoplay: true);
+    if (!mounted || token != _loadToken || !widget.active) {
+      _current = null;
+      await media.dispose();
+      return;
+    }
+    _loading = false;
+    if (!ok) {
+      _current = null;
+      _failed.add(drama.id);
+      await media.dispose();
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
+    media.ready = true;
+    if (mounted) {
+      setState(() {});
+    }
+    unawaited(_preloadNext());
+  }
+
+  Future<void> _preloadNext() async {
+    if (!widget.active || !_autoplayAllowed || _loading) {
+      return;
+    }
+    final int nextIndex = _index + 1;
+    if (nextIndex < 0 || nextIndex >= _feed.length) {
+      return;
+    }
+    final Drama next = _feed[nextIndex];
+    if (_next?.dramaId == next.id ||
+        _current?.dramaId == next.id ||
+        _failed.contains(next.id)) {
+      return;
+    }
+    final int token = _loadToken;
+    final _FeedMedia? media = await _prepareMedia(next);
+    if (!mounted || token != _loadToken || !widget.active) {
+      await media?.dispose();
+      return;
+    }
+    if (media == null) {
+      _failed.add(next.id);
+      return;
+    }
+    final _FeedMedia? old = _next;
+    _next = media;
+    if (mounted) {
+      setState(() {});
+    }
+    final bool ok = await _openMedia(media, autoplay: false);
+    if (!mounted || token != _loadToken || !widget.active) {
+      _next = null;
+      await media.dispose();
+      return;
+    }
+    if (!ok) {
+      _next = null;
+      _failed.add(next.id);
+      await media.dispose();
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
+    media.ready = true;
+    await old?.dispose();
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<_FeedMedia?> _prepareMedia(Drama drama) async {
+    Player? player;
+    try {
+      final repo = ref.read(playbackRepositoryProvider);
+      final List<EpisodeInfo> episodes = await repo.episodes(drama.id);
+      if (episodes.isEmpty) {
+        return null;
+      }
+      final EpisodeInfo first = episodes.firstWhere(
+        (EpisodeInfo item) => item.playable,
+        orElse: () => episodes.first,
+      );
+      final PlaybackBundle bundle = await repo.resolve(first.id);
+      final StreamInfo? stream = bundle.preferred ??
+          (bundle.streams.isEmpty ? null : bundle.streams.first);
+      if (stream == null || stream.url.isEmpty) {
+        return null;
+      }
+      player = Player();
+      final VideoController controller = VideoController(
+        player,
+        configuration: videoOutputConfiguration(defaultVideoOutputMode()),
+      );
+      return _FeedMedia(
+        dramaId: drama.id,
+        player: player,
+        controller: controller,
+        bundle: bundle,
+        stream: stream,
+      );
+    } catch (_) {
+      try {
+        await player?.dispose();
+      } catch (_) {}
+      return null;
+    }
+  }
+
+  Future<bool> _openMedia(
+    _FeedMedia media, {
+    required bool autoplay,
+  }) async {
+    try {
+      // 页面已先挂上 Video/Surface，再 open。
+      await WidgetsBinding.instance.endOfFrame;
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      if (media.bundle.hasKey) {
+        await (media.player.platform as dynamic).setProperty(
+          'demuxer-lavf-o',
+          'decryption_key=${media.bundle.contentKeyHex}',
+        );
+      }
+      await (media.player.platform as dynamic).setProperty(
+        'user-agent',
+        kCdnUserAgent,
+      );
+      await media.player.setVolume(0);
+      await media.player.open(Media(media.stream.url), play: false);
+      bool rendered = true;
+      await media.controller.waitUntilFirstFrameRendered.timeout(
+        const Duration(seconds: 6),
+        onTimeout: () {
+          rendered = false;
+        },
+      );
+      if (!rendered) {
+        return false;
+      }
+      if (autoplay) {
+        await media.player.setVolume(_muted ? 0 : 100);
+        await media.player.play();
+      } else {
+        await media.player.pause();
+        await media.player.setVolume(0);
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _onPageChanged(int index) {
+    setState(() => _index = index);
+    if (!widget.active) {
+      return;
+    }
+    final Drama drama = _feed[index];
+    final _FeedMedia? promoted = _next;
+    if (promoted != null &&
+        promoted.dramaId == drama.id &&
+        promoted.ready) {
+      final _FeedMedia? old = _current;
+      _current = promoted;
+      _next = null;
+      _loadToken++;
+      if (mounted) {
+        setState(() {});
+      }
+      unawaited(old?.dispose());
+      promoted.player.setVolume(_muted ? 0 : 100);
+      promoted.player.play();
+      unawaited(_preloadNext());
+      return;
+    }
+    // 预加载失败过的剧，用户切到这一页时再试一次。
+    _failed.remove(drama.id);
+    unawaited(_ensureCurrent(drama));
+  }
+
+  void _togglePlay() {
+    final _FeedMedia? media = _current;
+    if (media == null) {
+      final Drama? drama = _currentDrama();
+      if (drama != null && _autoplayAllowed) {
+        // 手动点画面时允许对失败的剧再试一次。
+        _failed.remove(drama.id);
+        unawaited(_ensureCurrent(drama));
+      }
+      return;
+    }
+    if (media.player.state.playing) {
+      unawaited(media.player.pause());
+    } else {
+      unawaited(media.player.play());
+    }
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _openFull(Drama drama) async {
+    unawaited(_current?.player.pause());
+    await openPlayer(context, drama);
+    if (mounted && widget.active) {
+      unawaited(_current?.player.play());
+    }
+  }
+
+  void _toggleMute() {
+    setState(() => _muted = !_muted);
+    unawaited(_current?.player.setVolume(_muted ? 0 : 100));
+  }
+
   void _shuffle() {
+    _loadToken++;
+    final _FeedMedia? oldCurrent = _current;
+    final _FeedMedia? oldNext = _next;
+    _current = null;
+    _next = null;
+    _failed.clear();
+    unawaited(oldCurrent?.dispose());
+    unawaited(oldNext?.dispose());
+    _index = 0;
     ref.invalidate(homeFeedProvider(_feedKey));
     if (_controller.hasClients) {
       _controller.jumpToPage(0);
     }
-    setState(() => _index = 0);
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<AsyncValue<HomeFeed>>(homeFeedProvider(_feedKey), (
+      AsyncValue<HomeFeed>? previous,
+      AsyncValue<HomeFeed> next,
+    ) {
+      final List<Drama>? before = previous?.value?.items;
+      final List<Drama>? after = next.value?.items;
+      if (before != after) {
+        _loadToken++;
+        final _FeedMedia? oldCurrent = _current;
+        final _FeedMedia? oldNext = _next;
+        _current = null;
+        _next = null;
+        _failed.clear();
+        unawaited(oldCurrent?.dispose());
+        unawaited(oldNext?.dispose());
+      }
+    });
+
     final AsyncValue<HomeFeed> feedAsync = ref.watch(
       homeFeedProvider(_feedKey),
     );
+    // 降级 mock 数据的 id 对真实 SDK 无效，只展示封面，不自动解析。
+    _autoplayAllowed =
+        feedAsync.value != null && !(feedAsync.value?.isFallback ?? false);
     final List<Drama> fetched = feedAsync.value?.items ?? const <Drama>[];
-    final List<Drama> feed = fetched.isEmpty ? mockDramas : fetched;
-    final int total = feed.length;
+    _feed = fetched.isEmpty ? mockDramas : fetched;
+    final int total = _feed.length;
     if (total == 0) {
       return const ColoredBox(
         color: AppTokens.playerBackground,
@@ -59,6 +453,7 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
       );
     }
     final int index = _index.clamp(0, total - 1);
+    _scheduleEnsureCurrent();
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: const SystemUiOverlayStyle(
@@ -77,16 +472,29 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
               controller: _controller,
               scrollDirection: Axis.vertical,
               itemCount: total,
-              onPageChanged: (int page) => setState(() => _index = page),
-              itemBuilder: (BuildContext context, int page) => _WatchFeedPage(
-                drama: feed[page],
-                isLast: page == total - 1,
-              ),
+              onPageChanged: _onPageChanged,
+              itemBuilder: (BuildContext context, int page) {
+                final Drama drama = _feed[page];
+                // 只有当前剧在这一页挂 Video；下一部在屏幕外预热，
+                // 避免 PageView 未构建相邻页时首帧等待超时。
+                final _FeedMedia? media = _current?.dramaId == drama.id
+                    ? _current
+                    : (_next?.dramaId == drama.id ? _next : null);
+                return WatchFeedPage(
+                  drama: drama,
+                  player: media?.player,
+                  controller: media?.controller,
+                  ready: media?.ready ?? false,
+                  isLast: page == total - 1,
+                  onTogglePlay: _togglePlay,
+                  onOpenFull: () => _openFull(drama),
+                );
+              },
             ),
             SafeArea(
               bottom: false,
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(18, 6, 8, 0),
+                padding: const EdgeInsets.fromLTRB(18, 6, 4, 0),
                 child: Row(
                   children: <Widget>[
                     const Text(
@@ -108,6 +516,17 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
                       ),
                     ),
                     IconButton(
+                      tooltip: _muted ? '取消静音' : '静音',
+                      onPressed: _toggleMute,
+                      icon: Icon(
+                        _muted
+                            ? Icons.volume_off_rounded
+                            : Icons.volume_up_rounded,
+                        size: 21,
+                        color: Colors.white,
+                      ),
+                    ),
+                    IconButton(
                       tooltip: '换一批',
                       onPressed: _shuffle,
                       icon: const Icon(
@@ -123,141 +542,6 @@ class _WatchFeedScreenState extends ConsumerState<WatchFeedScreen> {
           ],
         ),
       ),
-    );
-  }
-}
-
-class _WatchFeedPage extends StatelessWidget {
-  const _WatchFeedPage({required this.drama, required this.isLast});
-
-  final Drama drama;
-  final bool isLast;
-
-  @override
-  Widget build(BuildContext context) {
-    return Stack(
-      fit: StackFit.expand,
-      children: <Widget>[
-        Positioned.fill(
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () => openDramaDetail(context, drama),
-            child: PosterArtwork(drama: drama, variant: PosterVariant.full),
-          ),
-        ),
-        Positioned.fill(
-          child: IgnorePointer(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: <Color>[
-                    Colors.black.withValues(alpha: 0.34),
-                    Colors.black.withValues(alpha: 0.02),
-                    Colors.black.withValues(alpha: 0.88),
-                  ],
-                  stops: const <double>[0, 0.42, 1],
-                ),
-              ),
-            ),
-          ),
-        ),
-        Align(
-          alignment: Alignment.bottomCenter,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 22),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  drama.title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 24,
-                    height: 1.2,
-                    fontWeight: FontWeight.w800,
-                    color: Colors.white,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  drama.episodes > 0
-                      ? '全${drama.episodes}集 · ${drama.category}'
-                      : drama.category,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    height: 1.3,
-                    color: Colors.white.withValues(alpha: 0.72),
-                  ),
-                ),
-                const SizedBox(height: 5),
-                Text(
-                  drama.tags.join(' · '),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    height: 1.3,
-                    color: Colors.white.withValues(alpha: 0.52),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  drama.description,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    height: 1.6,
-                    color: Colors.white.withValues(alpha: 0.72),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  children: <Widget>[
-                    AppPillButton(
-                      label: '看全集',
-                      icon: Icons.play_arrow_rounded,
-                      height: 46,
-                      radius: 14,
-                      fontSize: 14.5,
-                      fontWeight: FontWeight.w700,
-                      horizontalPadding: 22,
-                      onPressed: () => openPlayer(context, drama),
-                    ),
-                    const SizedBox(width: 14),
-                    if (!isLast)
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: <Widget>[
-                          Icon(
-                            Icons.keyboard_arrow_up_rounded,
-                            size: 16,
-                            color: Colors.white.withValues(alpha: 0.50),
-                          ),
-                          const SizedBox(width: 3),
-                          Text(
-                            '上滑看下一部',
-                            style: TextStyle(
-                              fontSize: 11,
-                              height: 1.2,
-                              color: Colors.white.withValues(alpha: 0.50),
-                            ),
-                          ),
-                        ],
-                      ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
     );
   }
 }

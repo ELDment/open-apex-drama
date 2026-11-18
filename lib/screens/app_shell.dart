@@ -112,7 +112,7 @@ class _AppShellState extends ConsumerState<AppShell> {
             children: <Widget>[
               const HomeScreen(),
               const CategoryScreen(),
-              const WatchFeedScreen(),
+              WatchFeedScreen(active: _index == 2),
               FollowingScreen(
                 selectedTab: _followingTab,
                 onTabChanged: (FollowingTab tab) =>
