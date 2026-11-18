@@ -1192,9 +1192,64 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     return null;
   }
 
+  /// 当前集画面 + 弹幕。
+  ///
+  /// 独立成方法：静止时不要包 Transform——Android mediacodec_embed 的
+  /// Video 是原生 PlatformView，放进 Transform 层会导致整块黑屏。
+  Widget _buildCurrentVideoLayer(Drama drama) {
+    return Stack(
+      fit: StackFit.expand,
+      children: <Widget>[
+        if (_controller == null ||
+            (_currentStream == null && (_loading || _error != null)))
+          PosterArtwork(drama: drama, variant: PosterVariant.full)
+        else
+          IgnorePointer(
+            child: Center(
+              child: Video(
+                controller: _controller!,
+                controls: NoVideoControls,
+                fit: BoxFit.contain,
+              ),
+            ),
+          ),
+        // 弹幕层压在画面上、控制层之下；关掉时不构建。
+        // 只画在视频画面内：手机竖屏上下黑边、状态栏都不放弹幕。
+        if (_danmakuOn && _danmakuCues.isNotEmpty)
+          Positioned.fromRect(
+            rect: danmakuVideoRect(
+              area: MediaQuery.sizeOf(context),
+              videoWidth: _videoWidth,
+              videoHeight: _videoHeight,
+            ),
+            child: ValueListenableBuilder<DanmakuSettings>(
+              valueListenable: danmakuSettingsNotifier,
+              builder:
+                  (
+                    BuildContext context,
+                    DanmakuSettings settings,
+                    _,
+                  ) {
+                    return DanmakuLayer(
+                      cues: _danmakuCues,
+                      position: _danmakuClock,
+                      playing: _danmakuPlaying,
+                      travel: settings.travel,
+                      fontSize: settings.fontSize,
+                      area: settings.area,
+                      // 长按临时倍速同样需要让弹幕跟上进度。
+                      rate: _holdSpeedActive ? _holdRate : _rate,
+                    );
+                  },
+            ),
+          ),
+      ],
+    );
+  }
+
   /// 预加载相邻一集：与当前集同档清晰度，暂停并静音，等滑动时直接出画面。
   Future<void> _preloadNext() async {
-    if (!_isMobilePlatform || _isWideLayout) {
+    if (!_kEnablePreload || !_isMobilePlatform || _isWideLayout) {
       return;
     }
     final int next = nextPreloadEpisode(_episode, _episodeCount);
@@ -1643,89 +1698,78 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                       // 把所有手势交还给上层的 Flutter 手势层。
                       // 只要已经开过流就保留视频层：否则一次失败的启动会把
                       // 正在播放的画面换成封面，表现为"有声音、没画面还在报错"。
-                      Positioned.fill(
-                        child: Transform.translate(
-                          offset: Offset(0, _swipeDy),
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: <Widget>[
-                              if (_controller == null ||
-                                  (_currentStream == null &&
-                                      (_loading || _error != null)))
-                                PosterArtwork(
-                                  drama: drama,
-                                  variant: PosterVariant.full,
-                                )
-                              else
-                                IgnorePointer(
-                                  child: Center(
-                                    child: Video(
-                                      controller: _controller!,
-                                      controls: NoVideoControls,
-                                      fit: BoxFit.contain,
-                                    ),
-                                  ),
-                                ),
-                              // 弹幕层压在画面上、控制层之下；关掉时不构建。
-                              // 设置变化通过全局 notifier 即时重绘，无需重建整页。
-                              // 只画在视频画面内：手机竖屏上下黑边、状态栏都不放弹幕。
-                              if (_danmakuOn && _danmakuCues.isNotEmpty)
-                                Positioned.fromRect(
-                                  rect: danmakuVideoRect(
-                                    area: MediaQuery.sizeOf(context),
-                                    videoWidth: _videoWidth,
-                                    videoHeight: _videoHeight,
-                                  ),
-                                  child:
-                                      ValueListenableBuilder<DanmakuSettings>(
-                                        valueListenable:
-                                            danmakuSettingsNotifier,
-                                        builder:
-                                            (
-                                              BuildContext context,
-                                              DanmakuSettings settings,
-                                              _,
-                                            ) {
-                                              return DanmakuLayer(
-                                                cues: _danmakuCues,
-                                                position: _danmakuClock,
-                                                playing: _danmakuPlaying,
-                                                travel: settings.travel,
-                                                fontSize: settings.fontSize,
-                                                area: settings.area,
-                                                // 长按临时倍速同样需要让弹幕跟上进度。
-                                                rate: _holdSpeedActive
-                                                    ? _holdRate
-                                                    : _rate,
-                                              );
-                                            },
-                                      ),
-                                ),
-                            ],
+                      // 静止态完全保持改动前的树：Video/弹幕直接作为 Stack
+                      // 子节点。Android mediacodec_embed 的 Video 是原生
+                      // PlatformView，放进 Positioned/Transform/嵌套 Stack
+                      // 都会导致整块黑屏。只有拖动位移非 0 时才切到嵌套层。
+                      if (_swipeDy == 0) ...<Widget>[
+                        if (_controller == null ||
+                            (_currentStream == null &&
+                                (_loading || _error != null)))
+                          PosterArtwork(
+                            drama: drama,
+                            variant: PosterVariant.full,
+                          )
+                        else
+                          IgnorePointer(
+                            child: Center(
+                              child: Video(
+                                controller: _controller!,
+                                controls: NoVideoControls,
+                                fit: BoxFit.contain,
+                              ),
+                            ),
                           ),
-                        ),
-                      ),
-                      // 下一集固定槽位：空闲停在屏幕下方，提前创建 Surface；
-                      // 上滑跟手进入。下滑方向停到屏幕外更下方，绝不能把
-                      // 下一集画面当成上一集预览。
-                      if (_preloadController != null && !isWide)
+                        if (_danmakuOn && _danmakuCues.isNotEmpty)
+                          Positioned.fromRect(
+                            rect: danmakuVideoRect(
+                              area: MediaQuery.sizeOf(context),
+                              videoWidth: _videoWidth,
+                              videoHeight: _videoHeight,
+                            ),
+                            child: ValueListenableBuilder<DanmakuSettings>(
+                              valueListenable: danmakuSettingsNotifier,
+                              builder:
+                                  (
+                                    BuildContext context,
+                                    DanmakuSettings settings,
+                                    _,
+                                  ) {
+                                    return DanmakuLayer(
+                                      cues: _danmakuCues,
+                                      position: _danmakuClock,
+                                      playing: _danmakuPlaying,
+                                      travel: settings.travel,
+                                      fontSize: settings.fontSize,
+                                      area: settings.area,
+                                      // 长按临时倍速同样需要让弹幕跟上进度。
+                                      rate: _holdSpeedActive
+                                          ? _holdRate
+                                          : _rate,
+                                    );
+                                  },
+                            ),
+                          ),
+                      ] else
                         Positioned.fill(
                           child: Transform.translate(
-                            offset: Offset(
-                              0,
-                              shouldUsePreloadPreview(
-                                    swipeDirection: _swipeDirection,
-                                    preloadEpisode: _preloadEpisode,
-                                    currentEpisode: _episode,
-                                    hasController: true,
-                                  )
-                                  ? (_swipeDirection == 0
-                                            ? 1
-                                            : _swipeDirection) *
-                                        screenHeight +
-                                        _swipeDy
-                                  : screenHeight * 2,
-                            ),
+                            offset: Offset(0, _swipeDy),
+                            child: _buildCurrentVideoLayer(drama),
+                          ),
+                        ),
+                      // 预加载 Video 只在「上滑中」挂载：Android mediacodec_embed
+                      // 下第二块原生 Surface 常驻会抢走主画面（实测黑屏）。
+                      if (_swipeDirection == 1 &&
+                          !isWide &&
+                          shouldUsePreloadPreview(
+                            swipeDirection: _swipeDirection,
+                            preloadEpisode: _preloadEpisode,
+                            currentEpisode: _episode,
+                            hasController: _preloadController != null,
+                          ))
+                        Positioned.fill(
+                          child: Transform.translate(
+                            offset: Offset(0, screenHeight + _swipeDy),
                             child: IgnorePointer(
                               child: Center(
                                 child: Video(
@@ -2156,6 +2200,12 @@ bool isPlayerSheetZone(double x, double width) {
 
 const double _swipeCommitFraction = 0.28;
 const double _swipeCommitVelocity = 800;
+
+/// 双播放器预加载开关。
+///
+/// 模拟器上 master 原版同样黑屏，确认不是预加载导致；这里保持开启，
+/// 真机上仍需确认两块 embed Surface 能否共存。
+const bool _kEnablePreload = true;
 
 /// 预加载画面只用于「下一集」和上滑/空闲方向；下滑必须回到封面。
 @visibleForTesting
