@@ -6,6 +6,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:apexduanju/data/local/watch_store.dart';
 import 'package:apexduanju/data/mock_data.dart';
 import 'package:apexduanju/data/repository/mock_repositories.dart';
+import 'package:apexduanju/data/repository/repositories.dart';
+import 'package:apexduanju/models/danmaku_cue.dart';
 import 'package:apexduanju/models/playback.dart';
 import 'package:apexduanju/models/series_detail.dart';
 import 'package:apexduanju/providers/data_providers.dart';
@@ -38,6 +40,7 @@ void main() {
     required Size size,
     bool dark = false,
     double textScale = 1,
+    PlaybackRepository? playbackRepository,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
@@ -48,7 +51,7 @@ void main() {
         overrides: [
           catalogRepositoryProvider.overrideWithValue(MockCatalogRepository()),
           playbackRepositoryProvider.overrideWithValue(
-            MockPlaybackRepository(),
+            playbackRepository ?? MockPlaybackRepository(),
           ),
           rankRepositoryProvider.overrideWithValue(MockRankRepository()),
         ],
@@ -175,6 +178,26 @@ void main() {
     expect(find.text('分类'), findsOneWidget);
     expect(find.text('状态'), findsOneWidget);
     expect(find.text('全集已上线'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('detail folds episode grid to the first 20', (
+    WidgetTester tester,
+  ) async {
+    await pumpScreen(
+      tester,
+      DramaDetailScreen(drama: mockHero),
+      size: const Size(390, 844),
+      playbackRepository: _ThirtyEpisodePlaybackRepository(),
+    );
+
+    expect(find.text('20'), findsOneWidget);
+    expect(find.text('21'), findsNothing);
+    expect(find.textContaining('展开全部'), findsOneWidget);
+
+    await tester.tap(find.textContaining('展开全部'));
+    await tester.pumpAndSettle();
+    expect(find.text('21'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -882,6 +905,33 @@ void main() {
     expect(find.byType(DramaCard), findsNothing);
     expect(tester.takeException(), isNull);
   });
+}
+
+/// 详情页折叠测试用：固定返回 30 集，避免 mock 数据只有 3 集。
+class _ThirtyEpisodePlaybackRepository implements PlaybackRepository {
+  @override
+  Future<List<EpisodeInfo>> episodes(String seriesId) async {
+    return List<EpisodeInfo>.generate(
+      30,
+      (int i) => EpisodeInfo(
+        id: '$seriesId-ep${i + 1}',
+        seriesId: seriesId,
+        number: i + 1,
+        title: '第${i + 1}集',
+        playable: true,
+      ),
+    );
+  }
+
+  @override
+  Future<PlaybackBundle> resolve(String episodeId) {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<List<DanmakuCue>> danmaku(String seriesId, String episodeId) async {
+    return const <DanmakuCue>[];
+  }
 }
 
 /// 追加用例的 store 播种：按 WatchStore 的真实 JSON schema 写入

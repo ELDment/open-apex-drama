@@ -610,8 +610,8 @@ class _EpisodeSection extends StatefulWidget {
 }
 
 class _EpisodeSectionState extends State<_EpisodeSection> {
-  /// 默认渲染的集数上限：几百集的剧全量铺开会把整页拉得很长。
-  static const int _initialLimit = 100;
+  /// 默认只展示前 20 集；更多交给「展开全部」或播放页选集。
+  static const int _initialLimit = 20;
 
   bool _expanded = false;
 
