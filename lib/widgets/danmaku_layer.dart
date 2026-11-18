@@ -143,8 +143,25 @@ class _DanmakuLayerState extends State<DanmakuLayer>
   double? _preparedFontSize;
   Duration? _preparedTravel;
 
-  /// 同一条轨道上两条弹幕的最小间隔，避免文字重叠。
-  static const int _laneGapMs = 900;
+  /// 同一轨道内两条滚动弹幕的最小水平间距（像素）。
+  static const double _laneGapPx = 24;
+
+  /// 弹幕只占视频顶部/底部这一比例的区域，不铺满画面。
+  static const double _laneBandFraction = 0.35;
+
+  /// 单侧最多几条轨道。
+  static const int _maxLanes = 5;
+
+  @visibleForTesting
+  int get layoutCountForTest => _layouts.length;
+
+  @visibleForTesting
+  List<double> get layoutTopsForTest =>
+      _layouts.map((_CueLayout layout) => layout.top).toList();
+
+  @visibleForTesting
+  List<double> get layoutWidthsForTest =>
+      _layouts.map((_CueLayout layout) => layout.width).toList();
 
   @override
   void initState() {
@@ -304,13 +321,18 @@ class _DanmakuLayerState extends State<DanmakuLayer>
 
     final bool fixed = widget.area != DanmakuArea.scroll;
     final int travelMs = widget.travel.inMilliseconds;
-    final int laneGapMs = fixed ? 200 : _laneGapMs;
-    final double lineHeight = widget.fontSize + 9;
-    final int lanes = math.max(1, (size.height / lineHeight).floor());
-    final List<int> laneFreeAt = List<int>.filled(lanes, -1000000);
+    final double lineHeight = widget.fontSize * 1.15 + 8;
+    final double bandHeight = size.height * _laneBandFraction;
+    final int lanes = math.max(
+      1,
+      math.min(_maxLanes, (bandHeight / lineHeight).floor()),
+    );
+    final List<_Lane> laneStates = List<_Lane>.generate(lanes, (_) => _Lane());
     final List<_CueLayout> out = <_CueLayout>[];
+    final List<DanmakuCue> cues = List<DanmakuCue>.of(widget.cues)
+      ..sort((DanmakuCue a, DanmakuCue b) => a.offsetMs.compareTo(b.offsetMs));
 
-    for (final DanmakuCue cue in widget.cues) {
+    for (final DanmakuCue cue in cues) {
       final TextPainter painter = TextPainter(
         text: TextSpan(
           text: cue.text,
@@ -325,29 +347,51 @@ class _DanmakuLayerState extends State<DanmakuLayer>
           ),
         ),
         maxLines: 1,
+        ellipsis: '…',
         textDirection: TextDirection.ltr,
-      )..layout();
+      )..layout(maxWidth: size.width * 0.75);
       if (painter.width <= 0) {
         painter.dispose();
         continue;
       }
-      // 优先选已空闲的轨道，否则选最早空出来的那条，尽量均匀分布。
-      int lane = 0;
-      int earliest = 1 << 30;
+
+      // 找一条真正能放下的轨道；全满就丢弃这一条，绝不强行叠字。
+      int lane = -1;
       for (int i = 0; i < lanes; i++) {
-        if (laneFreeAt[i] <= cue.offsetMs - laneGapMs) {
+        final _Lane state = laneStates[i];
+        if (!state.occupied) {
           lane = i;
           break;
         }
-        if (laneFreeAt[i] < earliest) {
-          earliest = laneFreeAt[i];
-          lane = i;
+        if (fixed) {
+          // 停留式弹幕占满整个显示时长。
+          if (cue.offsetMs - state.startMs >= travelMs) {
+            lane = i;
+            break;
+          }
+        } else {
+          // 按文字宽度和速度算：上一条的尾巴至少离开右边距 [_laneGapPx]
+          // 才允许下一条进入，避免长弹幕在右侧撞在一起。
+          final double clearMs =
+              (state.width + _laneGapPx) *
+              travelMs /
+              (size.width + state.width);
+          if (cue.offsetMs - state.startMs >= clearMs) {
+            lane = i;
+            break;
+          }
         }
       }
-      // 滚动弹幕占用轨道的时间很短（让出后仍可追尾）；停留式弹幕
-      // 要等整条显示完，轨道才算空出来。
-      laneFreeAt[lane] = cue.offsetMs + (fixed ? travelMs : 0);
-      final double top = fixed && widget.area == DanmakuArea.bottom
+      if (lane < 0) {
+        painter.dispose();
+        continue;
+      }
+
+      laneStates[lane]
+        ..occupied = true
+        ..startMs = cue.offsetMs
+        ..width = painter.width;
+      final double top = widget.area == DanmakuArea.bottom
           ? size.height - (lane + 1) * lineHeight - 2
           : lane * lineHeight + 2;
       out.add(_CueLayout(cue: cue, painter: painter, top: top));

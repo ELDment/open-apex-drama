@@ -215,6 +215,73 @@ void main() {
     expect(caughtUp, greaterThanOrEqualTo(const Duration(milliseconds: 580)));
   });
 
+  testWidgets('同一时刻的弹幕不会强行叠轨，超出轨道数直接丢弃', (WidgetTester tester) async {
+    final ValueNotifier<Duration> position = ValueNotifier<Duration>(
+      Duration.zero,
+    );
+    final ValueNotifier<bool> playing = ValueNotifier<bool>(true);
+    addTearDown(position.dispose);
+    addTearDown(playing.dispose);
+
+    final List<DanmakuCue> cues = List<DanmakuCue>.generate(
+      20,
+      (int i) => DanmakuCue(text: '弹幕 $i', offsetMs: 0),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 400,
+            height: 300,
+            child: DanmakuLayer(
+              cues: cues,
+              position: position,
+              playing: playing,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final dynamic state = tester.state(find.byType(DanmakuLayer));
+    final int count = state.layoutCountForTest as int;
+    final List<double> tops = state.layoutTopsForTest as List<double>;
+    expect(count, lessThanOrEqualTo(5));
+    expect(tops.toSet().length, tops.length);
+  });
+
+  testWidgets('超长弹幕会按可用宽度截断', (WidgetTester tester) async {
+    final ValueNotifier<Duration> position = ValueNotifier<Duration>(
+      Duration.zero,
+    );
+    final ValueNotifier<bool> playing = ValueNotifier<bool>(true);
+    addTearDown(position.dispose);
+    addTearDown(playing.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 400,
+            height: 300,
+            child: DanmakuLayer(
+              cues: <DanmakuCue>[DanmakuCue(text: '长' * 300, offsetMs: 0)],
+              position: position,
+              playing: playing,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final dynamic state = tester.state(find.byType(DanmakuLayer));
+    final List<double> widths = state.layoutWidthsForTest as List<double>;
+    expect(widths, isNotEmpty);
+    expect(widths.single, lessThanOrEqualTo(400 * 0.75 + 1));
+  });
+
   testWidgets('没有弹幕时不构建绘制层', (WidgetTester tester) async {
     final ValueNotifier<Duration> position = ValueNotifier<Duration>(
       Duration.zero,

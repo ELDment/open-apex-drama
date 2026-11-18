@@ -11,6 +11,13 @@ class _CueLayout {
   double get width => painter.width;
 }
 
+/// 单条轨道的占用状态，用于按文字宽度做碰撞检测。
+class _Lane {
+  bool occupied = false;
+  int startMs = 0;
+  double width = 0;
+}
+
 /// 弹幕绘制器：滚动弹幕从右往左，顶部/底部弹幕水平居中停留。
 class _DanmakuPainter extends CustomPainter {
   _DanmakuPainter({
