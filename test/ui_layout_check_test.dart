@@ -803,54 +803,6 @@ void main() {
     expect(isPlayerSheetZone(290, 300), isFalse);
   });
 
-  test('preload preview only applies to the next episode and upward swipe', () {
-    expect(
-      shouldUsePreloadPreview(
-        swipeDirection: 1,
-        preloadEpisode: 2,
-        currentEpisode: 1,
-        hasController: true,
-      ),
-      isTrue,
-    );
-    expect(
-      shouldUsePreloadPreview(
-        swipeDirection: 0,
-        preloadEpisode: 2,
-        currentEpisode: 1,
-        hasController: true,
-      ),
-      isTrue,
-    );
-    expect(
-      shouldUsePreloadPreview(
-        swipeDirection: -1,
-        preloadEpisode: 2,
-        currentEpisode: 1,
-        hasController: true,
-      ),
-      isFalse,
-    );
-    expect(
-      shouldUsePreloadPreview(
-        swipeDirection: 1,
-        preloadEpisode: 3,
-        currentEpisode: 1,
-        hasController: true,
-      ),
-      isFalse,
-    );
-    expect(
-      shouldUsePreloadPreview(
-        swipeDirection: 1,
-        preloadEpisode: 2,
-        currentEpisode: 1,
-        hasController: false,
-      ),
-      isFalse,
-    );
-  });
-
   test('paused indicator only shows on mobile with a ready player', () {
     expect(
       shouldShowPausedIndicator(

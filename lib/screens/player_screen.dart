@@ -107,15 +107,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   PlaybackBundle? _bundle;
   StreamInfo? _currentStream;
 
-  /// 相邻集预加载播放器：移动端竖屏滑动切集时提供第二路视频。
-  /// 只保留一集，停止时静音暂停；提升为当前集后释放旧播放器并继续预取。
-  Player? _preloadPlayer;
-  VideoController? _preloadController;
-  int? _preloadEpisode;
-  PlaybackBundle? _preloadBundle;
-  StreamInfo? _preloadStream;
-  bool _preloading = false;
-  bool _preloadQueued = false;
+  /// 相邻集预解析缓存：只缓存解析结果，不建第二个 Player。
+  ///
+  /// Android 的 `vo=mediacodec_embed` 在真机上无法稳定共存两路视频输出，
+  /// 双播放器会抢走主画面，表现为「有声音、没画面」（v1.5.0 线上问题）。
+  /// 解析额度才是真正贵的一步，缓存 bundle 已足够让切集免二次解析。
+  PlaybackBundle? _prefetchedBundle;
+  int? _prefetchedEpisode;
+  bool _prefetching = false;
+  bool _prefetchQueued = false;
 
   /// 播放进度落盘节流间隔（毫秒）：播放中每 5 秒最多写一次。
   static const int _progressWriteIntervalMs = 5000;
@@ -392,7 +392,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
     _controlsHideTimer?.cancel();
     _swipeController.dispose();
-    _disposePreload(notify: false);
+    _clearPrefetch();
     _completedSub?.cancel();
     _positionSub?.cancel();
     _playingSub?.cancel();
@@ -513,8 +513,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (player == null) {
       return;
     }
-    // 任何重新开流的路径都先释放相邻集预加载，避免旧 Surface 残留。
-    _disposePreload(notify: false);
     final int token = ++_bootToken;
     bool superseded() => !mounted || token != _bootToken;
     setState(() {
@@ -544,7 +542,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       }
       _episode = episode.number;
 
-      final PlaybackBundle bundle = await repo.resolve(episode.id);
+      // 优先复用相邻集预解析结果：解析额度是限量的，切集不再重复请求。
+      PlaybackBundle? cached;
+      if (stream == null && _prefetchedEpisode == episode.number) {
+        cached = _prefetchedBundle;
+        _clearPrefetch();
+      }
+      final PlaybackBundle bundle = cached ?? await repo.resolve(episode.id);
       if (superseded()) {
         return; // 页面已退出或已被更新的启动取代：不再 open，避免覆盖现场。
       }
@@ -603,8 +607,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
       if (mounted) {
         setState(() => _loading = false);
-        // 当前集开播后再预加载下一集，避免未观看也消耗解析额度。
-        unawaited(_preloadNext());
+        // 当前集开播后再预解析下一集，避免未观看也消耗解析额度。
+        unawaited(_prefetchNext());
       }
     } on ApiException catch (error) {
       debugPrint('[player] 解析失败 ${error.code}: ${error.message}');
@@ -744,11 +748,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (_episodeCount > 0 && next > _episodeCount) {
       return;
     }
-    // 预加载已就绪时直接提升，自动连播/快捷键下一集也能无缝衔接。
-    if (_preloadEpisode == next && _preloadPlayer != null) {
-      _promotePreload();
-      return;
-    }
     // 切集前把当前集的最终进度落盘（播完时 progress==duration，
     // 该集会自然移出「继续观看」但保留在历史里）。
     _persistProgress(force: true);
@@ -782,8 +781,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       return;
     }
     if (_isFullscreen) {
-      // 全屏保持原有单播放器行为，先释放相邻集预加载。
-      _disposePreload();
       SystemChrome.setPreferredOrientations(<DeviceOrientation>[
         DeviceOrientation.landscapeLeft,
         DeviceOrientation.landscapeRight,
@@ -804,7 +801,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       // 等方向恢复后再预取，避免仍处于横屏时被 gate 掉。
       Future<void>.delayed(const Duration(milliseconds: 400), () {
         if (mounted) {
-          unawaited(_preloadNext());
+          unawaited(_prefetchNext());
         }
       });
     }
@@ -1167,15 +1164,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       return;
     }
     if (direction > 0) {
-      if (_preloadEpisode == _episode + 1 && _preloadPlayer != null) {
-        _promotePreload();
-      } else {
-        _playNext();
-        setState(() {
-          _swipeDy = 0;
-          _swipeDirection = 0;
-        });
-      }
+      _playNext();
+      setState(() {
+        _swipeDy = 0;
+        _swipeDirection = 0;
+      });
       return;
     }
     _playPrevious();
@@ -1249,26 +1242,28 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     );
   }
 
-  /// 预加载相邻一集：与当前集同档清晰度，暂停并静音，等滑动时直接出画面。
-  Future<void> _preloadNext() async {
-    if (!_kEnablePreload || !_isMobilePlatform || _isWideLayout) {
+  /// 预解析相邻一集：只缓存解析结果，不创建第二个播放器。
+  ///
+  /// Android 真机上第二路 `mediacodec_embed` 会抢占视频输出（有声无画），
+  /// 而真正稀缺的是解析额度——缓存 bundle 已足够让切集免二次解析。
+  Future<void> _prefetchNext() async {
+    if (!_kEnablePrefetch || !_isMobilePlatform || _isWideLayout) {
       return;
     }
     final int next = nextPreloadEpisode(_episode, _episodeCount);
     if (next == 0) {
-      _disposePreload();
+      _clearPrefetch();
       return;
     }
-    if (_preloadEpisode == next && _preloadController != null) {
+    if (_prefetchedEpisode == next) {
       return;
     }
-    if (_preloading) {
-      // 切集很快时把请求排队，等当前预加载结束后按新集重跑。
-      _preloadQueued = true;
+    if (_prefetching) {
+      // 切集很快时把请求排队，等当前预取结束后按新集重跑。
+      _prefetchQueued = true;
       return;
     }
-    _preloading = true;
-    Player? player;
+    _prefetching = true;
     try {
       final EpisodeInfo? info = _episodeByNumber(next);
       if (info == null) {
@@ -1283,149 +1278,23 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (_episode != next - 1) {
         return;
       }
-      final StreamInfo chosen = _pickStream(bundle, _currentStream);
-      if (chosen.url.isEmpty) {
-        return;
-      }
-      player = Player();
-      final VideoController controller = VideoController(
-        player,
-        configuration: videoOutputConfiguration(defaultVideoOutputMode()),
-      );
-      // 与首次进场一致：先给原生 Surface 一点初始化时间，再 open，
-      // 否则 mediacodec_embed 下可能因 surface 未就绪直接失败。
-      await WidgetsBinding.instance.endOfFrame;
-      await Future<void>.delayed(const Duration(milliseconds: 350));
-      if (!mounted ||
-          !_isMobilePlatform ||
-          _isWideLayout ||
-          _episode != next - 1) {
-        return;
-      }
-      if (bundle.hasKey) {
-        await (player.platform as dynamic).setProperty(
-          'demuxer-lavf-o',
-          'decryption_key=${bundle.contentKeyHex}',
-        );
-      }
-      await (player.platform as dynamic).setProperty(
-        'user-agent',
-        kCdnUserAgent,
-      );
-      await player.setVolume(0);
-      await player.open(Media(chosen.url));
-      await player.pause();
-      await player.setVolume(0);
-      // open 期间用户可能已经切集/进全屏，最终复核后再公布预加载结果。
-      if (!mounted ||
-          !_isMobilePlatform ||
-          _isWideLayout ||
-          _episode != next - 1) {
-        return;
-      }
-      _disposePreload();
-      _preloadPlayer = player;
-      _preloadController = controller;
-      _preloadEpisode = next;
-      _preloadBundle = bundle;
-      _preloadStream = chosen;
-      player = null;
-      if (mounted) {
-        setState(() {});
-      }
-    } catch (_) {
-      // 预加载失败不打扰正片：滑动回退封面，松手后走 _boot。
+      _prefetchedBundle = bundle;
+      _prefetchedEpisode = next;
+    } catch (error) {
+      // 预解析失败不打扰正片：切集时 _boot 会重新解析。
+      debugPrint('[player] 预解析失败 第$next集: $error');
     } finally {
-      if (player != null) {
-        try {
-          await player.dispose();
-        } catch (_) {}
-      }
-      _preloading = false;
-      if (_preloadQueued) {
-        _preloadQueued = false;
-        unawaited(_preloadNext());
+      _prefetching = false;
+      if (_prefetchQueued) {
+        _prefetchQueued = false;
+        unawaited(_prefetchNext());
       }
     }
   }
 
-  void _disposePreload({bool notify = true}) {
-    final Player? player = _preloadPlayer;
-    _preloadPlayer = null;
-    _preloadController = null;
-    _preloadEpisode = null;
-    _preloadBundle = null;
-    _preloadStream = null;
-    if (player != null) {
-      try {
-        player.stop();
-      } catch (_) {}
-      unawaited(player.dispose());
-    }
-    if (notify && mounted) {
-      setState(() {});
-    }
-  }
-
-  /// 把预加载播放器提升为当前集：旧播放器释放，新播放器恢复音量/倍速/播放。
-  void _promotePreload() {
-    final Player? nextPlayer = _preloadPlayer;
-    final VideoController? nextController = _preloadController;
-    final int? nextEpisode = _preloadEpisode;
-    final PlaybackBundle? nextBundle = _preloadBundle;
-    final StreamInfo? nextStream = _preloadStream;
-    if (nextPlayer == null || nextController == null || nextEpisode == null) {
-      _playNext();
-      return;
-    }
-    _persistProgress(force: true);
-    final Player? oldPlayer = _player;
-    _completedSub?.cancel();
-    _completedSub = null;
-    _positionSub?.cancel();
-    _positionSub = null;
-    _playingSub?.cancel();
-    _playingSub = null;
-    _videoParamsSub?.cancel();
-    _videoParamsSub = null;
-    _player = nextPlayer;
-    _controller = nextController;
-    _episode = nextEpisode;
-    _bundle = nextBundle;
-    _currentStream = nextStream;
-    _preferredDefinition = nextStream?.definition ?? _preferredDefinition;
-    _preloadPlayer = null;
-    _preloadController = null;
-    _preloadEpisode = null;
-    _preloadBundle = null;
-    _preloadStream = null;
-    _swipeDy = 0;
-    _swipeDirection = 0;
-    _loading = false;
-    _error = null;
-    _observeProgress(nextPlayer);
-    _completedSub = nextPlayer.stream.completed.listen((bool done) {
-      if (done && _autoPlay && mounted) {
-        _playNext();
-      }
-    });
-    nextPlayer.setVolume(_muted ? 0 : _volume * 100);
-    nextPlayer.setRate(_rate);
-    nextPlayer.play();
-    final EpisodeInfo? info = _episodeByNumber(nextEpisode);
-    if (info != null) {
-      unawaited(_loadDanmaku(info.id));
-    }
-    if (mounted) {
-      setState(() {});
-    }
-    if (oldPlayer != null) {
-      try {
-        oldPlayer.stop();
-      } catch (_) {}
-      unawaited(oldPlayer.dispose());
-    }
-    unawaited(_preloadNext());
+  void _clearPrefetch() {
+    _prefetchedBundle = null;
+    _prefetchedEpisode = null;
   }
 
   /// 单步 seek（桌面 ←/→ 快捷键用）：在当前位置上叠加
@@ -1759,31 +1628,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                             child: _buildCurrentVideoLayer(drama),
                           ),
                         ),
-                      // 预加载 Video 只在「上滑中」挂载：Android mediacodec_embed
-                      // 下第二块原生 Surface 常驻会抢走主画面（实测黑屏）。
-                      if (_swipeDirection == 1 &&
-                          !isWide &&
-                          shouldUsePreloadPreview(
-                            swipeDirection: _swipeDirection,
-                            preloadEpisode: _preloadEpisode,
-                            currentEpisode: _episode,
-                            hasController: _preloadController != null,
-                          ))
+                      // 上滑（下一集）不再挂第二路 Video：Android 的
+                      // mediacodec_embed 抢占视频输出会导致有声无画。
+                      // 过渡期间用封面，松手后由 _boot 走缓存重开。
+                      if (_swipeDirection > 0 && !isWide)
                         Positioned.fill(
                           child: Transform.translate(
                             offset: Offset(0, screenHeight + _swipeDy),
-                            child: IgnorePointer(
-                              child: Center(
-                                child: Video(
-                                  controller: _preloadController!,
-                                  controls: NoVideoControls,
-                                  fit: BoxFit.contain,
-                                ),
-                              ),
+                            child: PosterArtwork(
+                              drama: _activeDrama,
+                              variant: PosterVariant.full,
                             ),
                           ),
                         ),
-                      // 下滑（上一集）没有预加载，用封面从顶部进入。
+                      // 下滑（上一集）同样用封面从顶部进入。
                       if (_swipeDirection < 0 && !isWide)
                         Positioned.fill(
                           child: Transform.translate(
@@ -2243,30 +2101,10 @@ bool isPlayerSheetZone(double x, double width) {
 const double _swipeCommitFraction = 0.28;
 const double _swipeCommitVelocity = 800;
 
-/// 双播放器预加载开关。
-///
-/// 模拟器上 master 原版同样黑屏，确认不是预加载导致；这里保持开启，
-/// 真机上仍需确认两块 embed Surface 能否共存。
-const bool _kEnablePreload = true;
+/// 相邻集预解析开关（只缓存解析结果，不建第二个播放器）。
+const bool _kEnablePrefetch = true;
 
-/// 预加载画面只用于「下一集」和上滑/空闲方向；下滑必须回到封面。
-@visibleForTesting
-bool shouldUsePreloadPreview({
-  required int swipeDirection,
-  required int? preloadEpisode,
-  required int currentEpisode,
-  required bool hasController,
-}) {
-  if (!hasController || preloadEpisode == null) {
-    return false;
-  }
-  if (preloadEpisode != currentEpisode + 1) {
-    return false;
-  }
-  return swipeDirection >= 0;
-}
-
-/// 下一集预加载目标；最后一集或不合法输入返回 0。
+/// 下一集预解析目标；最后一集或不合法输入返回 0。
 @visibleForTesting
 int nextPreloadEpisode(int current, int count) {
   if (count <= 0 || current < 1 || current >= count) {
