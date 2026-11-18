@@ -16,19 +16,19 @@
 |:---:|:---:|:---:|
 | ![首页](docs/screenshots/mobile-home.jpg) | ![看剧](docs/screenshots/mobile-watch.jpg) | ![详情](docs/screenshots/mobile-detail.jpg) |
 
-| 播放页 | 播放设置 | 榜单 |
-|:---:|:---:|:---:|
-| ![播放页](docs/screenshots/mobile-player.jpg) | ![播放设置](docs/screenshots/mobile-settings.jpg) | ![榜单](docs/screenshots/mobile-rank.jpg) |
-
-### 桌面端 · 宽窗布局
-
-| 首页 | 看剧 | 详情 |
-|:---:|:---:|:---:|
-| ![首页](docs/screenshots/desktop-home.jpg) | ![看剧](docs/screenshots/desktop-watch.jpg) | ![详情](docs/screenshots/desktop-detail.jpg) |
-
 | 播放页 | 榜单 |
 |:---:|:---:|
-| ![播放页](docs/screenshots/desktop-player.jpg) | ![榜单](docs/screenshots/desktop-rank.jpg) |
+| ![播放页](docs/screenshots/mobile-player.jpg) | ![榜单](docs/screenshots/mobile-rank.jpg) |
+
+### 桌面端（Windows）
+
+| 首页 | 看剧 |
+|:---:|:---:|
+| ![首页](docs/screenshots/desktop-home.jpg) | ![看剧](docs/screenshots/desktop-watch.jpg) |
+
+| 详情 | 榜单 |
+|:---:|:---:|
+| ![详情](docs/screenshots/desktop-detail.jpg) | ![榜单](docs/screenshots/desktop-rank.jpg) |
 
 ## 功能
 
