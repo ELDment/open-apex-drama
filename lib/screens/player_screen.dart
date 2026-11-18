@@ -1946,6 +1946,34 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                           ),
                         ),
                       ),
+                      // 移动端暂停反馈：中心半透明灰白播放图标（抖音式）。
+                      IgnorePointer(
+                        child: AnimatedOpacity(
+                          opacity: shouldShowPausedIndicator(
+                                mobile: _isMobilePlatform,
+                                hasPlayer: _player != null,
+                                playing: _playing,
+                                loading: _loading,
+                                hasError: _error != null,
+                              )
+                              ? 1
+                              : 0,
+                          duration: const Duration(milliseconds: 160),
+                          child: const Center(
+                            child: Icon(
+                              Icons.play_arrow_rounded,
+                              size: 64,
+                              color: Color(0x9EFFFFFF),
+                              shadows: <Shadow>[
+                                Shadow(
+                                  color: Color(0x59000000),
+                                  blurRadius: 10,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
                       // 长按 2x 提示贴顶部居中（不挡画面）；
                       // 左右滑调进度仍用中央指示器。
                       if (_holdSpeedActive)
@@ -2187,6 +2215,18 @@ class _GlassSquareButton extends StatelessWidget {
       constraints: const BoxConstraints.tightFor(width: 36, height: 36),
     );
   }
+}
+
+/// 移动端暂停反馈：有播放器、未播放、未加载、无错误时显示中心播放图标。
+@visibleForTesting
+bool shouldShowPausedIndicator({
+  required bool mobile,
+  required bool hasPlayer,
+  required bool playing,
+  required bool loading,
+  required bool hasError,
+}) {
+  return mobile && hasPlayer && !playing && !loading && !hasError;
 }
 
 /// 长按中间 1/3 打开播放设置；两侧仍走临时 2x。

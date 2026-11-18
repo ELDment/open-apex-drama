@@ -813,6 +813,69 @@ void main() {
     );
   });
 
+  test('paused indicator only shows on mobile with a ready player', () {
+    expect(
+      shouldShowPausedIndicator(
+        mobile: true,
+        hasPlayer: true,
+        playing: false,
+        loading: false,
+        hasError: false,
+      ),
+      isTrue,
+    );
+    expect(
+      shouldShowPausedIndicator(
+        mobile: true,
+        hasPlayer: true,
+        playing: true,
+        loading: false,
+        hasError: false,
+      ),
+      isFalse,
+    );
+    expect(
+      shouldShowPausedIndicator(
+        mobile: false,
+        hasPlayer: true,
+        playing: false,
+        loading: false,
+        hasError: false,
+      ),
+      isFalse,
+    );
+    expect(
+      shouldShowPausedIndicator(
+        mobile: true,
+        hasPlayer: false,
+        playing: false,
+        loading: false,
+        hasError: false,
+      ),
+      isFalse,
+    );
+    expect(
+      shouldShowPausedIndicator(
+        mobile: true,
+        hasPlayer: true,
+        playing: false,
+        loading: true,
+        hasError: false,
+      ),
+      isFalse,
+    );
+    expect(
+      shouldShowPausedIndicator(
+        mobile: true,
+        hasPlayer: true,
+        playing: false,
+        loading: false,
+        hasError: true,
+      ),
+      isFalse,
+    );
+  });
+
   test('next preload episode respects the last episode', () {
     expect(nextPreloadEpisode(1, 3), 2);
     expect(nextPreloadEpisode(2, 3), 3);
