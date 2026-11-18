@@ -103,6 +103,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   StreamSubscription<Duration>? _positionSub;
   StreamSubscription<bool>? _playingSub;
 
+  /// 复用预取地址开流时的一次性错误监听：地址过期时丢弃缓存重试一次。
+  StreamSubscription<String>? _cachedOpenErrorSub;
+
   // 当前分集解析结果（含全部清晰度档位）与正在播放的流。
   PlaybackBundle? _bundle;
   StreamInfo? _currentStream;
@@ -141,6 +144,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   late String _seriesId = widget.drama.id;
 
   bool _autoPlay = true;
+
+  /// 自然播完自动切集中的防重入（动画期间 completed 可能再次触发）。
+  bool _autoAdvancing = false;
   bool _loading = true;
   bool _controlsVisible = true;
   bool _muted = false;
@@ -354,8 +360,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       configuration: videoOutputConfiguration(defaultVideoOutputMode()),
     );
     _completedSub = player.stream.completed.listen((bool done) {
-      if (done && _autoPlay && mounted) {
-        _playNext();
+      // 开流中 / 切档中不重复响应，避免 completed 连发时连跳两集。
+      if (done && _autoPlay && mounted && !_loading && !_switchingQuality) {
+        _onEpisodeCompleted();
       }
     });
     _observeProgress(player);
@@ -396,6 +403,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _completedSub?.cancel();
     _positionSub?.cancel();
     _playingSub?.cancel();
+    _cachedOpenErrorSub?.cancel();
     _videoParamsSub?.cancel();
     _danmakuPlaying.dispose();
     _danmakuClock.dispose();
@@ -514,6 +522,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       return;
     }
     final int token = ++_bootToken;
+    _cachedOpenErrorSub?.cancel();
+    _cachedOpenErrorSub = null;
+    // 本次是否复用了相邻集预解析结果（失败时丢弃缓存重试一次）。
+    bool usedCachedBundle = false;
     bool superseded() => !mounted || token != _bootToken;
     setState(() {
       _loading = true;
@@ -548,6 +560,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         cached = _prefetchedBundle;
         _clearPrefetch();
       }
+      usedCachedBundle = cached != null;
       final PlaybackBundle bundle = cached ?? await repo.resolve(episode.id);
       if (superseded()) {
         return; // 页面已退出或已被更新的启动取代：不再 open，避免覆盖现场。
@@ -566,6 +579,29 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       await Future<void>.delayed(const Duration(milliseconds: 350));
       if (superseded()) {
         return; // 等待期间退出或已被取代：保持销毁状态，不再 open。
+      }
+
+      // 缓存地址有时效：开流失败（典型是 CDN 403）时丢弃缓存重试一次。
+      // 只在复用预取结果时挂一次，正常解析不监听。
+      if (usedCachedBundle) {
+        StreamSubscription<String>? sub;
+        sub = player.stream.error.listen((String message) {
+          debugPrint('[player] 缓存地址开流失败: $message');
+          unawaited(sub?.cancel());
+          if (identical(_cachedOpenErrorSub, sub)) {
+            _cachedOpenErrorSub = null;
+          }
+          if (mounted && token == _bootToken) {
+            unawaited(
+              _boot(
+                stream: stream,
+                resumeFrom: resumeFrom,
+                playWhenReady: playWhenReady,
+              ),
+            );
+          }
+        });
+        _cachedOpenErrorSub = sub;
       }
 
       // 加密流：内容密钥交给 ffmpeg 解复用层（解密后编码器收到明文）。
@@ -615,6 +651,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (superseded()) {
         return; // 旧启动的失败不能覆盖新启动的结果。
       }
+      if (usedCachedBundle && !isQualitySwitch) {
+        // 预取地址有时效，暂停久了可能已过期：丢弃缓存按正常链路重试一次。
+        unawaited(
+          _boot(
+            stream: stream,
+            resumeFrom: resumeFrom,
+            playWhenReady: playWhenReady,
+          ),
+        );
+        return;
+      }
       if (isQualitySwitch) {
         await _handleSwitchFailure(stream, resumeFrom);
       } else if (mounted) {
@@ -625,6 +672,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       }
     } catch (error) {
       if (superseded()) {
+        return;
+      }
+      if (usedCachedBundle && !isQualitySwitch) {
+        unawaited(
+          _boot(
+            stream: stream,
+            resumeFrom: resumeFrom,
+            playWhenReady: playWhenReady,
+          ),
+        );
         return;
       }
       if (isQualitySwitch) {
@@ -738,6 +795,26 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       return;
     }
     await _boot(stream: target, resumeFrom: resumeFrom);
+  }
+
+  /// 本集自然播完：移动端竖屏先走与手动上滑一致的上滑动画，再切集；
+  /// 其余场景（桌面 / 全屏 / 最后一集）沿用直接切集。
+  void _onEpisodeCompleted() {
+    if (_autoAdvancing) {
+      return;
+    }
+    if (_episodeCount > 0 && _episode + 1 > _episodeCount) {
+      return;
+    }
+    if (!_isMobilePlatform || _isWideLayout) {
+      _playNext();
+      return;
+    }
+    _autoAdvancing = true;
+    setState(() => _swipeDirection = 1);
+    unawaited(
+      _commitSwipe(1).whenComplete(() => _autoAdvancing = false),
+    );
   }
 
   void _playNext() {
