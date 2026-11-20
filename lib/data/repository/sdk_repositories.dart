@@ -424,6 +424,11 @@ class SdkPlaybackRepository implements PlaybackRepository {
   }
 
   @override
+  void invalidate(String episodeId) {
+    _cache.remove(episodeId);
+  }
+
+  @override
   Future<List<DanmakuCue>> danmaku(String seriesId, String episodeId) async {
     try {
       return await _guard<List<DanmakuCue>>((OpenhongguoClient client) async {

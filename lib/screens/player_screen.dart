@@ -140,6 +140,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// 解码兜底进行中（防重入：兜底只对本页做一次）。
   bool _decodeFallbackInFlight = false;
 
+  /// issue #8：全档位 bytevc2 自动重解析的已试次数与对应集号
+  /// （换集即重置，上限见 _boot 内注释）。
+  int _undecodableRetries = 0;
+  int _undecodableRetryEpisode = -1;
+
   late int _episode;
   int _episodeCount = 0;
   List<EpisodeInfo> _episodes = const <EpisodeInfo>[];
@@ -642,14 +647,40 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         throw StateError('没有可用播放地址');
       }
       // issue #8：全部清晰度都是 bytevc2 时 mpv 无法解码（画面黑屏但
-      // 弹幕正常）。明示原因并保留重试入口，比静默黑屏友好。
-      if (bundle.allUndecodable && mounted && !superseded()) {
-        setState(() {
-          _loading = false;
-          _error = '该集视频编码（bytevc2）暂不支持播放，请稍后重试';
-        });
+      // 弹幕正常）。服务端按解析时机切换编码，丢弃缓存重新解析大概率
+      // 能换到可解码流；重试上限 2 次、间隔 3s（解析额度限量），仍
+      // 失败才明示原因。
+      if (bundle.allUndecodable) {
+        if (_undecodableRetryEpisode != episode.number) {
+          _undecodableRetryEpisode = episode.number;
+          _undecodableRetries = 0;
+        }
+        if (_undecodableRetries < 2) {
+          _undecodableRetries++;
+          repo.invalidate(episode.id);
+          await Future<void>.delayed(const Duration(seconds: 3));
+          if (superseded()) {
+            return;
+          }
+          unawaited(
+            _boot(
+              stream: stream,
+              resumeFrom: resumeFrom,
+              playWhenReady: playWhenReady,
+              isQualitySwitch: isQualitySwitch,
+            ),
+          );
+          return;
+        }
+        if (mounted) {
+          setState(() {
+            _loading = false;
+            _error = '该集视频编码（bytevc2）暂不支持播放，请稍后重试';
+          });
+        }
         return;
       }
+      _undecodableRetries = 0;
 
       // Surface 就绪后再 open，否则 MediaCodec 会因 surface 为空初始化失败。
       if (mounted) {
