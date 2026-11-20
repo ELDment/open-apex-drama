@@ -259,9 +259,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// 用 [defaultTargetPlatform] 而不是 [Platform.isWindows]：运行时桌面仍然
   /// 走原布局，widget 测试则能直接覆盖移动分支。macOS/Linux 桌面不在
   /// 发版范围，按桌面处理。
+  /// 平板（shortestSide ≥ 600）不按手机处理：与 Windows 端一致走桌面
+  /// 布局——底部完整控制行、下一集面板，不做胶囊右栏与竖屏手势。
   bool get _isMobilePlatform =>
-      defaultTargetPlatform == TargetPlatform.android ||
-      defaultTargetPlatform == TargetPlatform.iOS;
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS) &&
+      MediaQuery.sizeOf(context).shortestSide < 600;
 
   void _onMouseHover(PointerEvent event) {
     if (!_controlsVisible) {
