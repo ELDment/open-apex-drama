@@ -12,23 +12,31 @@
 
 ### 移动端
 
-| 首页 | 看剧 | 详情 |
-|:---:|:---:|:---:|
-| ![首页](docs/screenshots/mobile-home.jpg) | ![看剧](docs/screenshots/mobile-watch.jpg) | ![详情](docs/screenshots/mobile-detail.jpg) |
-
-| 播放页 | 榜单 |
-|:---:|:---:|
-| ![播放页](docs/screenshots/mobile-player.jpg) | ![榜单](docs/screenshots/mobile-rank.jpg) |
+<table>
+  <tr><th>首页</th><th>看剧</th><th>详情</th><th>播放页</th><th>榜单</th></tr>
+  <tr>
+    <td><img src="docs/screenshots/mobile-home.jpg" width="140"></td>
+    <td><img src="docs/screenshots/mobile-watch.jpg" width="140"></td>
+    <td><img src="docs/screenshots/mobile-detail.jpg" width="140"></td>
+    <td><img src="docs/screenshots/mobile-player.jpg" width="140"></td>
+    <td><img src="docs/screenshots/mobile-rank.jpg" width="140"></td>
+  </tr>
+</table>
 
 ### 桌面端（Windows）
 
-| 首页 | 播放页 |
-|:---:|:---:|
-| ![首页](docs/screenshots/desktop-home.jpg) | ![播放页](docs/screenshots/desktop-player.jpg) |
-
-| 详情 | 榜单 |
-|:---:|:---:|
-| ![详情](docs/screenshots/desktop-detail.jpg) | ![榜单](docs/screenshots/desktop-rank.jpg) |
+<table>
+  <tr><th>首页</th><th>播放页</th></tr>
+  <tr>
+    <td><img src="docs/screenshots/desktop-home.jpg" width="400"></td>
+    <td><img src="docs/screenshots/desktop-player.jpg" width="400"></td>
+  </tr>
+  <tr><th>详情</th><th>榜单</th></tr>
+  <tr>
+    <td><img src="docs/screenshots/desktop-detail.jpg" width="400"></td>
+    <td><img src="docs/screenshots/desktop-rank.jpg" width="400"></td>
+  </tr>
+</table>
 
 ## 功能
 

@@ -259,9 +259,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// 用 [defaultTargetPlatform] 而不是 [Platform.isWindows]：运行时桌面仍然
   /// 走原布局，widget 测试则能直接覆盖移动分支。macOS/Linux 桌面不在
   /// 发版范围，按桌面处理。
+  /// 平板（shortestSide ≥ 600）不按手机处理：与 Windows 端一致走桌面
+  /// 布局——底部完整控制行、下一集面板，不做胶囊右栏与竖屏手势。
   bool get _isMobilePlatform =>
-      defaultTargetPlatform == TargetPlatform.android ||
-      defaultTargetPlatform == TargetPlatform.iOS;
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS) &&
+      MediaQuery.sizeOf(context).shortestSide < 600;
 
   void _onMouseHover(PointerEvent event) {
     if (!_controlsVisible) {
@@ -272,14 +275,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   /// 安排控制层自动隐藏。
   ///
-  /// 移动端只在全屏播放时隐藏（竖屏播放页保留常显的操作与下一集面板）；
-  /// 桌面沿用鼠标静置隐藏。
+  /// 移动端与桌面统一：播放中 2 秒（桌面 3 秒）后隐藏；
+  /// 暂停时常显（见 [_onPlayingChanged]），拖进度中不隐藏（见定时器回调）。
   void _scheduleControlsHide() {
     _controlsHideTimer?.cancel();
     final bool mobile = _isMobilePlatform;
-    if (mobile && !_isWideLayout) {
-      return;
-    }
     final Duration delay = mobile
         ? _mobileControlsAutoHideDelay
         : _controlsAutoHideDelay;
@@ -1447,9 +1447,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   /// 收藏 / 分享操作栏（竖屏与横屏全屏共用一份）。
   /// 收藏与详情页 / 追剧页共用同一 store，状态天然联动。
-  /// 手机端将高频的倍速 / 选集移到右侧，并隐藏分享。
+  /// 手机端将高频的倍速 / 选集移到右侧，并隐藏分享；
+  /// 移动端右栏收成毛玻璃胶囊工具条（自动隐藏后随控制层一起淡出）。
   Widget _buildActionRail({required bool compact}) {
-    return _ActionRail(
+    final Widget rail = _ActionRail(
       onFavorite: _toggleFavorite,
       onShare: () {},
       favorited: ref.watch(isFavoriteProvider(_seriesId)),
@@ -1461,6 +1462,22 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       onToggleDanmaku: _toggleDanmaku,
       onDanmakuSettings: () => showDanmakuSettings(context),
       onMore: _showPlayerActions,
+    );
+    // 竖屏胶囊容器：半透明深底 + 细描边，让按钮组在画面上是一个
+    // 悬浮工具条而不是散落的大字按钮；横屏（compact=false）保持原样。
+    if (!compact) {
+      return rail;
+    }
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0x8C141418),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: const Color(0x1FFFFFFF)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+        child: rail,
+      ),
     );
   }
 
@@ -1545,8 +1562,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
             backgroundColor: AppTokens.playerBackground,
             // 手势方案：
             // - 点击：桌面切播放状态（控制层由鼠标移动唤出，见
-            //   [_onDesktopTap]）；移动端同样切播放状态，并保持控制层可见，
-            //   与主流短剧「点一下暂停/继续」一致；
+            //   [_onDesktopTap]）；移动端同样切播放状态，控制层隐藏时
+            //   先唤出并在 2 秒后再隐（见 [_onMobileTap]）。
             // - 上下滑切集用底层 Listener 直接比对指针位移，绕开手势竞技场，
             //   避免被子级滚动/滑块等识别器抢走；
             // - 长按左/右半屏持续快退/快进，左右滑拖动进度（竞技场里按住不动
@@ -1762,6 +1779,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                                       episodeNumber: _episode,
                                       qualityLabel:
                                           _currentStream?.definition ?? '',
+                                      showMobileActions: compactControls,
+                                      speedLabel: _speedLabel,
+                                      onSpeed: _showSpeedSheet,
+                                      isFullscreen: isWide,
+                                      onToggleFullscreen: _toggleFullscreen,
                                     ),
                                   ),
                                   Align(
@@ -1838,17 +1860,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                                                     onPressed: _showEpisodes,
                                                   ),
                                                 ],
-                                                _GlassSquareButton(
-                                                  icon: isWide
-                                                      ? Icons
-                                                            .fullscreen_exit_rounded
-                                                      : Icons
-                                                            .fullscreen_rounded,
-                                                  tooltip: isWide
-                                                      ? '退出全屏'
-                                                      : '全屏',
-                                                  onPressed: _toggleFullscreen,
-                                                ),
+                                                // 移动端竖屏：全屏与倍速在顶栏，
+                                                // Player 未就绪时底部不再兜底。
+                                                if (!compactControls)
+                                                  _GlassSquareButton(
+                                                    icon: isWide
+                                                        ? Icons
+                                                              .fullscreen_exit_rounded
+                                                        : Icons
+                                                              .fullscreen_rounded,
+                                                    tooltip: isWide
+                                                        ? '退出全屏'
+                                                        : '全屏',
+                                                    onPressed:
+                                                        _toggleFullscreen,
+                                                  ),
                                               ],
                                             ),
                                           ),
@@ -2067,6 +2093,11 @@ class _PlayerTopBar extends StatelessWidget {
     required this.drama,
     required this.episodeNumber,
     required this.qualityLabel,
+    this.showMobileActions = false,
+    this.speedLabel = '',
+    this.onSpeed,
+    this.isFullscreen = false,
+    this.onToggleFullscreen,
   });
 
   final Drama drama;
@@ -2074,6 +2105,13 @@ class _PlayerTopBar extends StatelessWidget {
 
   /// 当前流清晰度（如 1080P）；空串表示未就绪，副标题只显示集数。
   final String qualityLabel;
+
+  /// 移动端竖屏：标题右侧放倍速 pill 与全屏按钮（全屏从底部控制行上移）。
+  final bool showMobileActions;
+  final String speedLabel;
+  final VoidCallback? onSpeed;
+  final bool isFullscreen;
+  final VoidCallback? onToggleFullscreen;
 
   @override
   Widget build(BuildContext context) {
@@ -2125,6 +2163,17 @@ class _PlayerTopBar extends StatelessWidget {
               ],
             ),
           ),
+          if (showMobileActions) ...<Widget>[
+            _RailTextAction(label: speedLabel, onTap: onSpeed ?? () {}),
+            const SizedBox(width: 4),
+            _GlassSquareButton(
+              icon: isFullscreen
+                  ? Icons.fullscreen_exit_rounded
+                  : Icons.fullscreen_rounded,
+              tooltip: isFullscreen ? '退出全屏' : '全屏',
+              onPressed: onToggleFullscreen ?? () {},
+            ),
+          ],
         ],
       ),
     );
@@ -2320,17 +2369,9 @@ class _PlaybackProgress extends StatelessWidget {
                     const SizedBox(height: 2),
                     Row(
                       children: <Widget>[
-                        // 移动端竖屏：点画面暂停、上下滑切集，底部只留全屏。
-                        if (compact) ...<Widget>[
-                          const Spacer(),
-                          _GlassSquareButton(
-                            icon: isFullscreen
-                                ? Icons.fullscreen_exit_rounded
-                                : Icons.fullscreen_rounded,
-                            tooltip: isFullscreen ? '退出全屏' : '全屏',
-                            onPressed: onToggleFullscreen,
-                          ),
-                        ] else ...<Widget>[
+                        // 移动端竖屏：点画面暂停、上下滑切集；全屏与倍速
+                        // 已上移到顶栏，底部只留时间与进度条。
+                        if (!compact) ...<Widget>[
                           _GlassSquareButton(
                             icon: Icons.skip_previous_rounded,
                             tooltip: '上一集',
@@ -2575,14 +2616,13 @@ class _ActionRail extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
         if (compact) ...<Widget>[
-          _RailTextAction(label: speedLabel, onTap: onSpeed),
-          const SizedBox(height: 10),
+          // 倍速已上移顶栏；胶囊只保留选集 / 弹幕 / 设置 / 收藏。
           _RailAction(
             icon: Icons.list_rounded,
             label: '选集',
             onTap: onOpenEpisodes,
           ),
-          const SizedBox(height: 18),
+          const SizedBox(height: 10),
           _RailAction(
             icon: danmakuOn
                 ? Icons.subtitles_rounded
