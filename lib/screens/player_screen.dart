@@ -1776,6 +1776,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                                       episodeNumber: _episode,
                                       qualityLabel:
                                           _currentStream?.definition ?? '',
+                                      showMobileActions: compactControls,
+                                      speedLabel: _speedLabel,
+                                      onSpeed: _showSpeedSheet,
+                                      isFullscreen: isWide,
+                                      onToggleFullscreen: _toggleFullscreen,
                                     ),
                                   ),
                                   Align(
@@ -1852,17 +1857,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                                                     onPressed: _showEpisodes,
                                                   ),
                                                 ],
-                                                _GlassSquareButton(
-                                                  icon: isWide
-                                                      ? Icons
-                                                            .fullscreen_exit_rounded
-                                                      : Icons
-                                                            .fullscreen_rounded,
-                                                  tooltip: isWide
-                                                      ? '退出全屏'
-                                                      : '全屏',
-                                                  onPressed: _toggleFullscreen,
-                                                ),
+                                                // 移动端竖屏：全屏与倍速在顶栏，
+                                                // Player 未就绪时底部不再兜底。
+                                                if (!compactControls)
+                                                  _GlassSquareButton(
+                                                    icon: isWide
+                                                        ? Icons
+                                                              .fullscreen_exit_rounded
+                                                        : Icons
+                                                              .fullscreen_rounded,
+                                                    tooltip: isWide
+                                                        ? '退出全屏'
+                                                        : '全屏',
+                                                    onPressed:
+                                                        _toggleFullscreen,
+                                                  ),
                                               ],
                                             ),
                                           ),
@@ -2081,6 +2090,11 @@ class _PlayerTopBar extends StatelessWidget {
     required this.drama,
     required this.episodeNumber,
     required this.qualityLabel,
+    this.showMobileActions = false,
+    this.speedLabel = '',
+    this.onSpeed,
+    this.isFullscreen = false,
+    this.onToggleFullscreen,
   });
 
   final Drama drama;
@@ -2088,6 +2102,13 @@ class _PlayerTopBar extends StatelessWidget {
 
   /// 当前流清晰度（如 1080P）；空串表示未就绪，副标题只显示集数。
   final String qualityLabel;
+
+  /// 移动端竖屏：标题右侧放倍速 pill 与全屏按钮（全屏从底部控制行上移）。
+  final bool showMobileActions;
+  final String speedLabel;
+  final VoidCallback? onSpeed;
+  final bool isFullscreen;
+  final VoidCallback? onToggleFullscreen;
 
   @override
   Widget build(BuildContext context) {
@@ -2139,6 +2160,17 @@ class _PlayerTopBar extends StatelessWidget {
               ],
             ),
           ),
+          if (showMobileActions) ...<Widget>[
+            _RailTextAction(label: speedLabel, onTap: onSpeed ?? () {}),
+            const SizedBox(width: 4),
+            _GlassSquareButton(
+              icon: isFullscreen
+                  ? Icons.fullscreen_exit_rounded
+                  : Icons.fullscreen_rounded,
+              tooltip: isFullscreen ? '退出全屏' : '全屏',
+              onPressed: onToggleFullscreen ?? () {},
+            ),
+          ],
         ],
       ),
     );
@@ -2334,17 +2366,9 @@ class _PlaybackProgress extends StatelessWidget {
                     const SizedBox(height: 2),
                     Row(
                       children: <Widget>[
-                        // 移动端竖屏：点画面暂停、上下滑切集，底部只留全屏。
-                        if (compact) ...<Widget>[
-                          const Spacer(),
-                          _GlassSquareButton(
-                            icon: isFullscreen
-                                ? Icons.fullscreen_exit_rounded
-                                : Icons.fullscreen_rounded,
-                            tooltip: isFullscreen ? '退出全屏' : '全屏',
-                            onPressed: onToggleFullscreen,
-                          ),
-                        ] else ...<Widget>[
+                        // 移动端竖屏：点画面暂停、上下滑切集；全屏与倍速
+                        // 已上移到顶栏，底部只留时间与进度条。
+                        if (!compact) ...<Widget>[
                           _GlassSquareButton(
                             icon: Icons.skip_previous_rounded,
                             tooltip: '上一集',
@@ -2589,14 +2613,13 @@ class _ActionRail extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
         if (compact) ...<Widget>[
-          _RailTextAction(label: speedLabel, onTap: onSpeed),
-          const SizedBox(height: 10),
+          // 倍速已上移顶栏；胶囊只保留选集 / 弹幕 / 设置 / 收藏。
           _RailAction(
             icon: Icons.list_rounded,
             label: '选集',
             onTap: onOpenEpisodes,
           ),
-          const SizedBox(height: 18),
+          const SizedBox(height: 10),
           _RailAction(
             icon: danmakuOn
                 ? Icons.subtitles_rounded
