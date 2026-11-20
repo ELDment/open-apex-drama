@@ -641,6 +641,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (chosen.url.isEmpty) {
         throw StateError('没有可用播放地址');
       }
+      // issue #8：全部清晰度都是 bytevc2 时 mpv 无法解码（画面黑屏但
+      // 弹幕正常）。明示原因并保留重试入口，比静默黑屏友好。
+      if (bundle.allUndecodable && mounted && !superseded()) {
+        setState(() {
+          _loading = false;
+          _error = '该集视频编码（bytevc2）暂不支持播放，请稍后重试';
+        });
+        return;
+      }
 
       // Surface 就绪后再 open，否则 MediaCodec 会因 surface 为空初始化失败。
       if (mounted) {
@@ -768,8 +777,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   /// 从 bundle 里挑出要播放的流：优先显式指定的档位，其次用户最近
   /// 选择的清晰度，最后按 [PlaybackBundle.preferred]（未加密 + 最高分辨率）。
+  /// 同档位/兜底选择都优先跳过无法解码的流（bytevc2，issue #8）。
   StreamInfo _pickStream(PlaybackBundle bundle, StreamInfo? requested) {
     if (requested != null) {
+      for (final StreamInfo item in bundle.streams) {
+        if (item.definition == requested.definition &&
+            item.url.isNotEmpty &&
+            !item.undecodable) {
+          return item;
+        }
+      }
       for (final StreamInfo item in bundle.streams) {
         if (item.definition == requested.definition && item.url.isNotEmpty) {
           return item;
@@ -778,12 +795,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
     if (_preferredDefinition.isNotEmpty) {
       for (final StreamInfo item in bundle.streams) {
+        if (item.definition == _preferredDefinition &&
+            item.url.isNotEmpty &&
+            !item.undecodable) {
+          return item;
+        }
+      }
+      for (final StreamInfo item in bundle.streams) {
         if (item.definition == _preferredDefinition && item.url.isNotEmpty) {
           return item;
         }
       }
     }
-    return bundle.preferred ??
+    return bundle.decodablePreferred ??
+        bundle.preferred ??
         const StreamInfo(definition: '未知', url: '', backupUrl: '');
   }
 
