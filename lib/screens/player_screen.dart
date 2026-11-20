@@ -272,14 +272,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   /// 安排控制层自动隐藏。
   ///
-  /// 移动端只在全屏播放时隐藏（竖屏播放页保留常显的操作与下一集面板）；
-  /// 桌面沿用鼠标静置隐藏。
+  /// 移动端与桌面统一：播放中 2 秒（桌面 3 秒）后隐藏；
+  /// 暂停时常显（见 [_onPlayingChanged]），拖进度中不隐藏（见定时器回调）。
   void _scheduleControlsHide() {
     _controlsHideTimer?.cancel();
     final bool mobile = _isMobilePlatform;
-    if (mobile && !_isWideLayout) {
-      return;
-    }
     final Duration delay = mobile
         ? _mobileControlsAutoHideDelay
         : _controlsAutoHideDelay;
@@ -1447,9 +1444,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   /// 收藏 / 分享操作栏（竖屏与横屏全屏共用一份）。
   /// 收藏与详情页 / 追剧页共用同一 store，状态天然联动。
-  /// 手机端将高频的倍速 / 选集移到右侧，并隐藏分享。
+  /// 手机端将高频的倍速 / 选集移到右侧，并隐藏分享；
+  /// 移动端右栏收成毛玻璃胶囊工具条（自动隐藏后随控制层一起淡出）。
   Widget _buildActionRail({required bool compact}) {
-    return _ActionRail(
+    final Widget rail = _ActionRail(
       onFavorite: _toggleFavorite,
       onShare: () {},
       favorited: ref.watch(isFavoriteProvider(_seriesId)),
@@ -1461,6 +1459,22 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       onToggleDanmaku: _toggleDanmaku,
       onDanmakuSettings: () => showDanmakuSettings(context),
       onMore: _showPlayerActions,
+    );
+    // 竖屏胶囊容器：半透明深底 + 细描边，让按钮组在画面上是一个
+    // 悬浮工具条而不是散落的大字按钮；横屏（compact=false）保持原样。
+    if (!compact) {
+      return rail;
+    }
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0x8C141418),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: const Color(0x1FFFFFFF)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+        child: rail,
+      ),
     );
   }
 
@@ -1545,8 +1559,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
             backgroundColor: AppTokens.playerBackground,
             // 手势方案：
             // - 点击：桌面切播放状态（控制层由鼠标移动唤出，见
-            //   [_onDesktopTap]）；移动端同样切播放状态，并保持控制层可见，
-            //   与主流短剧「点一下暂停/继续」一致；
+            //   [_onDesktopTap]）；移动端同样切播放状态，控制层隐藏时
+            //   先唤出并在 2 秒后再隐（见 [_onMobileTap]）。
             // - 上下滑切集用底层 Listener 直接比对指针位移，绕开手势竞技场，
             //   避免被子级滚动/滑块等识别器抢走；
             // - 长按左/右半屏持续快退/快进，左右滑拖动进度（竞技场里按住不动

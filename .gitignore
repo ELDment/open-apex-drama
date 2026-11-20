@@ -57,3 +57,6 @@ app.*.map.json
 /android/key.properties
 *.jks
 *.keystore
+
+# 本地产品原型（不随仓库分发）
+/docs/prototypes/
