@@ -7,6 +7,7 @@ import '../../models/catalog.dart';
 import '../../models/danmaku_cue.dart';
 import '../../models/drama.dart';
 import '../../models/playback.dart';
+import '../../models/search_results.dart';
 import '../../models/series_detail.dart';
 import '../mappers.dart';
 import '../remote/openhongguo_service.dart';
@@ -73,14 +74,25 @@ class SdkCatalogRepository implements CatalogRepository {
           pageSize: pageSize,
         ),
       );
-      final Map<String, String> covers = await _searchCovers(
+      // 官方搜索页会混入帖子 / UGC 视频（episodeCount 为 0），它们不是剧集，
+      // 点开详情会返回 101000 content_gone。搜索结果只保留有集数的条目。
+      final List<SeriesSummary> dramas = <SeriesSummary>[
+        for (final SeriesSummary item in page.items)
+          if (item.episodeCount > 0) item,
+      ];
+      final Map<String, SeriesDetail> details = await _searchDetails(
         client,
-        page.items,
+        dramas,
       );
+      await _primeSeasonCounts(client, dramas, details, query);
       return SearchPage(
         items: <Drama>[
-          for (final SeriesSummary item in page.items)
-            dramaFromSummary(item, coverUrl: covers[item.id]),
+          for (final SeriesSummary item in dramas)
+            dramaFromSummary(
+              item,
+              coverUrl: details[item.id]?.series?.coverUrl,
+              seasonCount: _seasonCountFor(item.id, details[item.id]),
+            ),
         ],
         cursor: page.cursor,
         hasMore: page.hasMore && page.cursor.isNotEmpty,
@@ -88,34 +100,84 @@ class SdkCatalogRepository implements CatalogRepository {
     });
   }
 
+  /// 季数按合集 id 缓存：同合集的不同季、重复搜索都只查一次。
+  final Map<String, int> _seasonCountCache = <String, int>{};
 
-  /// 搜索接口不返回封面（SDK 的 ParseSearch 只映射 id/标题/简介/集数），
-  /// 直接渲染会整屏渐变色块。这里用一次 getSeriesBatch 批量补齐；
-  /// 补不到或批量接口失败时保持无封面，不影响搜索结果本身。
-  static Future<Map<String, String>> _searchCovers(
+  /// 单页最多补几部剧的季数。seasons() 内部不止一次请求，而匿名设备的
+  /// 目录额度有限，不能对每个结果都查。
+  static const int _seasonCountProbeLimit = 3;
+
+  /// 搜索接口不返回封面和多季标记（SDK 的 ParseSearch 只映射
+  /// id/标题/简介/集数），直接渲染会整屏渐变色块、也看不出是否多季。
+  /// 这里用一次 getSeriesBatch 批量补齐；失败时保持无封面，不影响结果本身。
+  static Future<Map<String, SeriesDetail>> _searchDetails(
     OpenhongguoClient client,
     List<SeriesSummary> items,
   ) async {
     final List<String> ids = <String>[
       for (final SeriesSummary item in items)
-        if (item.id.isNotEmpty && item.coverUrl.isEmpty) item.id,
+        if (item.id.isNotEmpty) item.id,
     ];
     if (ids.isEmpty) {
-      return const <String, String>{};
+      return const <String, SeriesDetail>{};
     }
     try {
       final List<SeriesDetail> details = await client.getSeriesBatch(ids);
-      return <String, String>{
+      return <String, SeriesDetail>{
         for (final SeriesDetail detail in details)
-          if (detail.series != null &&
-              detail.series!.id.isNotEmpty &&
-              detail.series!.coverUrl.isNotEmpty)
-            detail.series!.id: detail.series!.coverUrl,
+          if (detail.series != null && detail.series!.id.isNotEmpty)
+            detail.series!.id: detail,
       };
     } catch (_) {
-      return const <String, String>{};
+      return const <String, SeriesDetail>{};
     }
   }
+
+  /// 给「标题直接命中且确为多季」的结果补总季数，供卡片显示「共 N 季」。
+  /// 只探测前几部：同名的不同制作版本都会各自给出季数。
+  Future<void> _primeSeasonCounts(
+    OpenhongguoClient client,
+    List<SeriesSummary> items,
+    Map<String, SeriesDetail> details,
+    String query,
+  ) async {
+    final List<String> candidates = <String>[
+      for (final SeriesSummary item in items)
+        if (titleMatchesQuery(item.title, query) &&
+            (details[item.id]?.series?.isMultiSeason ?? false) &&
+            !_seasonCountCache.containsKey(_seasonKey(item.id, details[item.id])))
+          item.id,
+    ].take(_seasonCountProbeLimit).toList();
+    await Future.wait<void>(<Future<void>>[
+      for (final String id in candidates) _probeSeasonCount(client, id, details[id]),
+    ]);
+  }
+
+  Future<void> _probeSeasonCount(
+    OpenhongguoClient client,
+    String seriesId,
+    SeriesDetail? detail,
+  ) async {
+    try {
+      final Album album = await client.seasons(seriesId);
+      final int count = album.seasonCount > 0
+          ? album.seasonCount
+          : album.seasons.length;
+      if (count > 1) {
+        _seasonCountCache[_seasonKey(seriesId, detail)] = count;
+      }
+    } catch (_) {
+      // 季接口失败不影响搜索结果本身，卡片不显示季数即可。
+    }
+  }
+
+  String _seasonKey(String seriesId, SeriesDetail? detail) {
+    final String albumId = detail?.series?.relatedAlbumId ?? '';
+    return albumId.isEmpty ? seriesId : albumId;
+  }
+
+  int _seasonCountFor(String seriesId, SeriesDetail? detail) =>
+      _seasonCountCache[_seasonKey(seriesId, detail)] ?? 0;
 
   @override
   Future<List<String>> suggest(String prefix) {

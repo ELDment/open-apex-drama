@@ -8,6 +8,7 @@ import '../data/remote/openhongguo_service.dart';
 import '../data/repository/repositories.dart';
 import '../models/catalog.dart';
 import '../models/drama.dart';
+import '../models/search_results.dart';
 import '../providers/data_providers.dart';
 import '../theme/app_colors.dart';
 import '../widgets/ambient_glow.dart';
@@ -523,12 +524,22 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
           if (chained) ..._more,
         ];
         final bool hasMore = chained ? _moreHasMore : page.hasMore;
+        // 官方一页里混着「标题命中」和「猜你喜欢」，拆开渲染，
+        // 避免同类推荐把真正搜到的剧挤下去。
+        final SearchResultGroups groups = groupSearchResults(
+          results,
+          _committed,
+        );
+        final String summary = groups.hasSuggested
+            ? '「$_committed」 · 命中 ${groups.matched.length} 部 · '
+                  '猜你喜欢 ${groups.suggested.length} 部'
+            : '「$_committed」 · 找到 ${results.length} 部作品';
         return <Widget>[
         SliverToBoxAdapter(
           child: Padding(
             padding: EdgeInsets.fromLTRB(horizontal, 8, horizontal, 0),
             child: Text(
-              '「$_committed」 · 找到 ${results.length} 部作品',
+              summary,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
@@ -539,7 +550,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
             ),
           ),
         ),
-        if (results.isEmpty)
+        if (groups.isEmpty)
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.only(top: 14),
@@ -552,28 +563,34 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
               ),
             ),
           )
-        else
-          SliverPadding(
-            padding: EdgeInsets.fromLTRB(horizontal, 10, horizontal, 0),
-            sliver: SliverGrid(
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: columns,
-                mainAxisSpacing: 18,
-                crossAxisSpacing: 11,
-                mainAxisExtent: itemExtent,
-              ),
-              delegate: SliverChildBuilderDelegate(
-                (BuildContext context, int index) {
-                  final Drama drama = results[index];
-                  return DramaCard(
-                    drama: drama,
-                    onTap: () => openDramaDetail(context, drama),
-                  );
-                },
-                childCount: results.length,
+        else ...<Widget>[
+          if (groups.matched.isNotEmpty)
+            _resultGrid(
+              horizontal: horizontal,
+              items: groups.matched,
+              columns: columns,
+              itemExtent: itemExtent,
+            ),
+          if (groups.suggested.isNotEmpty) ...<Widget>[
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                  horizontal,
+                  groups.matched.isEmpty ? 12 : 24,
+                  horizontal,
+                  0,
+                ),
+                child: const SectionHeader(title: '猜你喜欢'),
               ),
             ),
-          ),
+            _resultGrid(
+              horizontal: horizontal,
+              items: groups.suggested,
+              columns: columns,
+              itemExtent: itemExtent,
+            ),
+          ],
+        ],
         if (hasMore)
           SliverToBoxAdapter(
             child: Padding(
@@ -590,6 +607,36 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
           ),
         ];
       },
+    );
+  }
+
+  /// 结果网格（命中 / 猜你喜欢共用同一套卡片规格）。
+  Widget _resultGrid({
+    required double horizontal,
+    required List<Drama> items,
+    required int columns,
+    required double itemExtent,
+  }) {
+    return SliverPadding(
+      padding: EdgeInsets.fromLTRB(horizontal, 10, horizontal, 0),
+      sliver: SliverGrid(
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: columns,
+          mainAxisSpacing: 18,
+          crossAxisSpacing: 11,
+          mainAxisExtent: itemExtent,
+        ),
+        delegate: SliverChildBuilderDelegate(
+          (BuildContext context, int index) {
+            final Drama drama = items[index];
+            return DramaCard(
+              drama: drama,
+              onTap: () => openDramaDetail(context, drama),
+            );
+          },
+          childCount: items.length,
+        ),
+      ),
     );
   }
 

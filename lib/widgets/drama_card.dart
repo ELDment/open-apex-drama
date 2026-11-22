@@ -26,6 +26,7 @@ class DramaCard extends StatelessWidget {
     return Semantics(
       button: true,
       label: '${drama.title}，${drama.metaLabel}'
+          '${drama.seasonCount > 1 ? '，共${drama.seasonCount}季' : ''}'
           '${drama.rating > 0 ? '，评分${drama.ratingLabel}' : ''}',
       child: InkWell(
         onTap: onTap,
@@ -68,6 +69,17 @@ class DramaCard extends StatelessWidget {
                             label: '全${drama.episodes}集',
                             background: Colors.black.withValues(alpha: 0.52),
                             foreground: Colors.white.withValues(alpha: 0.92),
+                          ),
+                        ),
+                      // 多季剧在卡片上直接标总季数，避免用户以为只搜到一季。
+                      if (showBadge && drama.seasonCount > 1)
+                        Positioned(
+                          right: 7,
+                          bottom: 7,
+                          child: _Tag(
+                            label: '共${drama.seasonCount}季',
+                            background: colors.brandStrong,
+                            foreground: colors.onBrand,
                           ),
                         ),
                     ],
