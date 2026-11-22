@@ -39,6 +39,7 @@ Drama dramaFromSummary(
   SeriesSummary summary, {
   String kind = '短剧',
   String? coverUrl,
+  int seasonCount = 0,
 }) {
   final String category = summary.category.trim();
   return Drama(
@@ -55,6 +56,7 @@ Drama dramaFromSummary(
     // 搜索接口本身不带封面，调用方可传入补齐后的地址。
     coverUrl: coverUrl ?? summary.coverUrl,
     episodeTitles: const <String>[],
+    seasonCount: seasonCount,
   );
 }
 
