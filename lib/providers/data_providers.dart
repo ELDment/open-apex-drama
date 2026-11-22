@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -115,6 +117,11 @@ final episodesProvider =
 /// 详情页聚合（完整数据 + 多季 + 相关推荐）。
 final seriesDetailProvider =
     FutureProvider.family<SeriesDetailData, String>((Ref ref, String seriesId) {
+  // 详情页进出频繁，保留状态避免每次重建都闪一次骨架屏；
+  // 网络数据本身在仓库层还有 10 分钟 TTL 缓存。保留同样时长后自动释放。
+  final link = ref.keepAlive();
+  final Timer timer = Timer(const Duration(minutes: 10), link.close);
+  ref.onDispose(timer.cancel);
   return ref.watch(catalogRepositoryProvider).seriesDetail(seriesId);
 });
 

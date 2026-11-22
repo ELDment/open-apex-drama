@@ -93,7 +93,10 @@ class _DramaDetailScreenState extends ConsumerState<DramaDetailScreen> {
         ? 20
         : horizontalPagePadding(context);
     // 推荐位：聚合数据就绪前用本地 mock 过渡，就绪后换真实推荐。
+    // 匿名推荐是通用榜单，标题用服务端给的「更多好剧」而不是「相关推荐」；
+    // 类型对齐后可以是「更多漫剧 / 更多电影」，拿不到同类型内容时为空并隐藏。
     final List<Drama> related = detail?.recommend ?? _related;
+    final String recommendTitle = detail?.recommendTitle ?? '相关推荐';
 
     // The detail page is always dark, so it also uses the dark token set even
     // when the rest of the app is in light mode.
@@ -214,34 +217,37 @@ class _DramaDetailScreenState extends ConsumerState<DramaDetailScreen> {
                                 ),
                                 payType: detail?.payType ?? 0,
                               ),
-                            const SizedBox(height: 26),
-                            SectionHeader(
-                              title: '相关推荐',
-                              trailing: '查看更多',
-                              onTrailingTap: () => openPlaceholder(
-                                context,
-                                title: '相关推荐',
-                                icon: Icons.movie_filter_outlined,
-                                message: '更多同类好剧正在整理中',
+                            if (related.isNotEmpty) ...<Widget>[
+                              const SizedBox(height: 26),
+                              SectionHeader(
+                                title: recommendTitle,
+                                trailing: '查看更多',
+                                onTrailingTap: () => openPlaceholder(
+                                  context,
+                                  title: recommendTitle,
+                                  icon: Icons.movie_filter_outlined,
+                                  message: '更多同类好剧正在整理中',
+                                ),
                               ),
-                            ),
-                            const SizedBox(height: 12),
-                            SizedBox(
-                              height: 198,
-                              child: ListView.separated(
-                                scrollDirection: Axis.horizontal,
-                                itemCount: related.length,
-                                separatorBuilder: (BuildContext _, int _) =>
-                                    const SizedBox(width: 11),
-                                itemBuilder: (BuildContext context, int index) {
-                                  final Drama item = related[index];
-                                  return _RelatedCard(
-                                    drama: item,
-                                    onTap: () => openDramaDetail(context, item),
-                                  );
-                                },
+                              const SizedBox(height: 12),
+                              SizedBox(
+                                height: 198,
+                                child: ListView.separated(
+                                  scrollDirection: Axis.horizontal,
+                                  itemCount: related.length,
+                                  separatorBuilder: (BuildContext _, int _) =>
+                                      const SizedBox(width: 11),
+                                  itemBuilder: (BuildContext context, int index) {
+                                    final Drama item = related[index];
+                                    return _RelatedCard(
+                                      drama: item,
+                                      onTap: () =>
+                                          openDramaDetail(context, item),
+                                    );
+                                  },
+                                ),
                               ),
-                            ),
+                            ],
                           ],
                         ),
                       ),

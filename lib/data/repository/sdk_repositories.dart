@@ -258,40 +258,157 @@ class SdkCatalogRepository implements CatalogRepository {
     });
   }
 
+  /// 详情聚合缓存：同一部剧反复进入时直接复用，避免重复消耗匿名目录额度，
+  /// 也避免推荐位每次刷新出不同内容。过期后重新拉取，失败时退回旧数据。
+  static const Duration _detailCacheTtl = Duration(minutes: 10);
+  static const int _detailCacheLimit = 40;
+  final Map<String, _CachedDetail> _detailCache = <String, _CachedDetail>{};
+  final Map<String, _CachedFeed> _kindFeedCache = <String, _CachedFeed>{};
+
   @override
-  Future<SeriesDetailData> seriesDetail(String seriesId) {
-    return _guard<SeriesDetailData>((OpenhongguoClient client) async {
-      // 三个请求并行；多季接口对单季剧会失败，容忍为空。
-      final List<dynamic> results = await Future.wait(<Future<dynamic>>[
-        client.getSeries(seriesId),
-        client.seriesRecommend(seriesId),
-        client
+  Future<SeriesDetailData> seriesDetail(String seriesId) async {
+    final _CachedDetail? cached = _detailCache[seriesId];
+    if (cached != null && cached.isFresh) {
+      return cached.data;
+    }
+    try {
+      final SeriesDetailData data = await _guard<SeriesDetailData>((
+        OpenhongguoClient client,
+      ) async {
+        // 先取详情确定类型；推荐、多季、同类型频道随后并行发出，
+        // 不再等三个请求全部结束才补推荐。
+        final Series series = await client.getSeries(seriesId);
+        final String kind = kindForContentType(series.contentType.value);
+        final Future<Recommend> recommendFuture = client.seriesRecommend(
+          seriesId,
+        );
+        final Future<Album> albumFuture = client
             .seasons(seriesId)
-            .catchError((Object _) => Album()),
-      ]);
-      final Series series = results[0] as Series;
-      final Recommend recommend = results[1] as Recommend;
-      final Album album = results[2] as Album;
-      return SeriesDetailData(
-        drama: dramaFromSeries(series),
-        seasons: <SeasonInfo>[
-          for (final Season season in album.seasons)
-            SeasonInfo(
-              seriesId: season.seriesId,
-              title: season.title,
-              index: season.index,
-              episodeCount: season.episodeCount,
-            ),
-        ],
-        recommend: <Drama>[
-          for (final SeriesSummary item in recommend.items)
-            dramaFromSummary(item),
-        ],
-        isMultiSeason: series.isMultiSeason,
-        relatedAlbumId: series.relatedAlbumId,
-        payType: series.payType.value,
+            .catchError((Object _) => Album());
+        final Future<List<Drama>> sameKindFuture = kind == '短剧'
+            ? Future<List<Drama>>.value(const <Drama>[])
+            : _discoverSameKind(client, kind);
+        final Recommend recommend = await recommendFuture;
+        final Album album = await albumFuture;
+        final List<Drama> sameKind = await sameKindFuture;
+        final _Recommendation recommendation = _recommendationFor(
+          series: series,
+          recommend: recommend,
+          kind: kind,
+          sameKind: sameKind,
+        );
+        return SeriesDetailData(
+          drama: dramaFromSeries(series, kind: kind),
+          seasons: <SeasonInfo>[
+            for (final Season season in album.seasons)
+              SeasonInfo(
+                seriesId: season.seriesId,
+                title: season.title,
+                index: season.index,
+                episodeCount: season.episodeCount,
+              ),
+          ],
+          recommend: recommendation.items,
+          recommendTitle: recommendation.title,
+          isMultiSeason: series.isMultiSeason,
+          relatedAlbumId: series.relatedAlbumId,
+          payType: series.payType.value,
+        );
+      });
+      _rememberDetail(seriesId, data);
+      return data;
+    } catch (_) {
+      if (cached != null) {
+        return cached.data;
+      }
+      rethrow;
+    }
+  }
+
+  void _rememberDetail(String seriesId, SeriesDetailData data) {
+    _detailCache[seriesId] = _CachedDetail(data);
+    if (_detailCache.length <= _detailCacheLimit) {
+      return;
+    }
+    // 超出上限时淘汰最旧的一条，避免长会话无限增长。
+    String? oldestKey;
+    DateTime? oldestAt;
+    for (final MapEntry<String, _CachedDetail> entry in _detailCache.entries) {
+      if (oldestAt == null || entry.value.at.isBefore(oldestAt)) {
+        oldestAt = entry.value.at;
+        oldestKey = entry.key;
+      }
+    }
+    if (oldestKey != null) {
+      _detailCache.remove(oldestKey);
+    }
+  }
+
+  /// 统一处理详情页推荐：匿名接口固定回通用的「更多好剧」（与当前剧无关、
+  /// 且恒为真人剧），非真人剧时改用同类型频道内容，替换不到就隐藏推荐区。
+  static _Recommendation _recommendationFor({
+    required Series series,
+    required Recommend recommend,
+    required String kind,
+    required List<Drama> sameKind,
+  }) {
+    final String cellTitle = recommend.cellTitle.trim();
+    final List<Drama> generic = <Drama>[
+      for (final SeriesSummary item in recommend.items)
+        if (item.id.isNotEmpty && item.id != series.id)
+          dramaFromSummary(item),
+    ];
+    if (cellTitle != '更多好剧') {
+      return _Recommendation(
+        title: cellTitle.isEmpty ? '相关推荐' : cellTitle,
+        items: generic,
       );
-    });
+    }
+    if (kind == '短剧') {
+      return _Recommendation(title: cellTitle, items: generic);
+    }
+    final List<Drama> candidates = <Drama>[
+      for (final Drama item in sameKind)
+        if (item.id != series.id) item,
+    ];
+    if (candidates.isEmpty) {
+      return const _Recommendation(title: '', items: <Drama>[]);
+    }
+    return _Recommendation(title: '更多$kind', items: candidates);
+  }
+
+  /// 按类型取首页频道内容当推荐；没有对应频道的类型（电视剧）返回空。
+  /// 频道列表按类型缓存，连续打开漫剧/电影详情时推荐位不再重复等待。
+  Future<List<Drama>> _discoverSameKind(
+    OpenhongguoClient client,
+    String kind,
+  ) async {
+    final String channel = switch (kind) {
+      '漫剧' => '漫剧',
+      '电影' => '电影',
+      _ => '',
+    };
+    if (channel.isEmpty) {
+      return const <Drama>[];
+    }
+    final _CachedFeed? cached = _kindFeedCache[kind];
+    if (cached != null && cached.isFresh) {
+      return cached.items;
+    }
+    try {
+      final PagedResult<SeriesSummary> page = await client.discover(
+        DiscoverOptions(channel: channel),
+      );
+      final List<Drama> items = <Drama>[
+        for (final SeriesSummary item in page.items)
+          if (item.id.isNotEmpty && item.episodeCount > 0)
+            dramaFromSummary(item, kind: kind),
+      ];
+      _kindFeedCache[kind] = _CachedFeed(items);
+      return items;
+    } catch (_) {
+      return cached?.items ?? const <Drama>[];
+    }
   }
 
   @override
@@ -534,4 +651,34 @@ class SdkPlaybackRepository implements PlaybackRepository {
       // 日志写失败不影响播放。
     }
   }
+}
+
+/// 带过期时间的详情缓存。
+class _CachedDetail {
+  _CachedDetail(this.data) : at = DateTime.now();
+
+  final SeriesDetailData data;
+  final DateTime at;
+
+  bool get isFresh =>
+      DateTime.now().difference(at) < SdkCatalogRepository._detailCacheTtl;
+}
+
+/// 带过期时间的频道列表缓存。
+class _CachedFeed {
+  _CachedFeed(this.items) : at = DateTime.now();
+
+  final List<Drama> items;
+  final DateTime at;
+
+  bool get isFresh =>
+      DateTime.now().difference(at) < SdkCatalogRepository._detailCacheTtl;
+}
+
+/// 详情页推荐区的最终内容与标题。
+class _Recommendation {
+  const _Recommendation({required this.title, required this.items});
+
+  final String title;
+  final List<Drama> items;
 }

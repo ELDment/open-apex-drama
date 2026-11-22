@@ -9,6 +9,7 @@ import 'package:apexduanju/data/mock_data.dart';
 import 'package:apexduanju/data/repository/mock_repositories.dart';
 import 'package:apexduanju/data/repository/repositories.dart';
 import 'package:apexduanju/models/danmaku_cue.dart';
+import 'package:apexduanju/models/drama.dart';
 import 'package:apexduanju/models/playback.dart';
 import 'package:apexduanju/models/series_detail.dart';
 import 'package:apexduanju/providers/data_providers.dart';
@@ -43,6 +44,7 @@ void main() {
     bool dark = false,
     double textScale = 1,
     PlaybackRepository? playbackRepository,
+    CatalogRepository? catalogRepository,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
@@ -51,7 +53,9 @@ void main() {
       ProviderScope(
         // 布局测试固定走 mock 数据源，避免测试环境触碰网络与原生 SDK。
         overrides: [
-          catalogRepositoryProvider.overrideWithValue(MockCatalogRepository()),
+          catalogRepositoryProvider.overrideWithValue(
+            catalogRepository ?? MockCatalogRepository(),
+          ),
           playbackRepositoryProvider.overrideWithValue(
             playbackRepository ?? MockPlaybackRepository(),
           ),
@@ -427,6 +431,48 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('detail uses server recommendation title instead of 相关推荐', (
+    WidgetTester tester,
+  ) async {
+    final SeriesDetailData comic = SeriesDetailData(
+      drama: mockHero,
+      recommend: <Drama>[mockDramas[1], mockDramas[2]],
+      recommendTitle: '更多漫剧',
+    );
+
+    await pumpScreen(
+      tester,
+      DramaDetailScreen(drama: mockHero),
+      size: const Size(390, 844),
+      catalogRepository: _RecommendCatalog(comic),
+    );
+
+    expect(find.text('更多漫剧'), findsOneWidget);
+    expect(find.text('相关推荐'), findsNothing);
+    expect(find.text(mockDramas[1].title), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('detail hides recommendation section when list is empty', (
+    WidgetTester tester,
+  ) async {
+    final SeriesDetailData empty = SeriesDetailData(
+      drama: mockHero,
+      recommendTitle: '',
+    );
+
+    await pumpScreen(
+      tester,
+      DramaDetailScreen(drama: mockHero),
+      size: const Size(390, 844),
+      catalogRepository: _RecommendCatalog(empty),
+    );
+
+    expect(find.text('相关推荐'), findsNothing);
+    expect(find.text('查看更多'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('multi-season detail shows season row and refetches episodes', (
     WidgetTester tester,
@@ -1209,6 +1255,18 @@ void _noop() {}
 void _absorbTab(FollowingTab _) {}
 
 /// 固定返回多季聚合数据，验证详情页季 Tab 的交互数据流。
+class _RecommendCatalog extends MockCatalogRepository {
+  _RecommendCatalog(this.detail);
+
+  final SeriesDetailData detail;
+
+  @override
+  Future<SeriesDetailData> seriesDetail(String seriesId) async {
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    return detail;
+  }
+}
+
 class _MultiSeasonCatalog extends MockCatalogRepository {
   _MultiSeasonCatalog({required this.detail});
 

@@ -28,6 +28,7 @@ class SeriesDetailData {
     required this.drama,
     this.seasons = const <SeasonInfo>[],
     this.recommend = const <Drama>[],
+    this.recommendTitle = '相关推荐',
     this.isMultiSeason = false,
     this.relatedAlbumId = '',
     this.payType = 0,
@@ -37,6 +38,10 @@ class SeriesDetailData {
   final Drama drama;
   final List<SeasonInfo> seasons;
   final List<Drama> recommend;
+
+  /// 推荐区标题。匿名推荐是通用的「更多好剧」，不该再叫「相关推荐」；
+  /// 按类型替换内容时用「更多漫剧 / 更多电影」。
+  final String recommendTitle;
   final bool isMultiSeason;
 
   /// 多季合集 id（跳转合集用，暂未接入）。
