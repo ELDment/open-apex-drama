@@ -579,8 +579,11 @@ class SdkPlaybackRepository implements PlaybackRepository {
         if (bundle.streams.isNotEmpty) {
           _cache[episodeId] = bundle;
         }
+        final String codecs = bundle.streams
+            .map((StreamInfo s) => '${s.definition}:${s.codec}')
+            .join(',');
         _logResolve(
-          'ok episode=$episodeId streams=${bundle.streams.length}'
+          'ok episode=$episodeId streams=${bundle.streams.length} codecs=$codecs'
           '${attempt > 0 ? ' retry=$attempt' : ''}',
         );
         return bundle;
