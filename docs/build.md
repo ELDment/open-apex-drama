@@ -90,3 +90,8 @@ APK 带 `v` 前缀，Windows 包不带。
 - Windows：fork 内含 cgo DLL 桥接与预编译 openhongguo.dll，源码构建完整可用；
   桥接的构建说明见 fork 仓库 `bindings/flutter/windows/BUILD_DLL.md`
 - 升级 SDK：在 fork 同步上游最新代码（或合入所需上游 PR）后，手动更新 `pubspec.yaml` 中该依赖的 `ref`
+- **重建 Android 原生库必须用 Go 1.26.3 及以上**：Go 1.26.0/1.26.1 在 32 位
+  Android 8.0–10（API 26–29）上会调用被 seccomp 拦截的 `futex_time64`，进程收到
+  SIGSYS 直接闪退（[golang/go#77621](https://github.com/golang/go/issues/77621)）。
+  上游 v0.4.0 的 `natives.tgz` 仍是 Go 1.26.0 构建，直接取用会复现该问题；重编后
+  在 fork 提交并更新 `ref`（见 [issue #15](https://github.com/Sxuan-Coder/open-apex-drama/issues/15)）

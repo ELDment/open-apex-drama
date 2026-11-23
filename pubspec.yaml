@@ -16,11 +16,14 @@ dependencies:
   cupertino_icons: ^1.0.8
   # 水果平台短剧的非官方 SDK（Apache-2.0，上游项目见 README 致谢）。
   # 通过 git 依赖引用自维护 fork；ref 锁定 commit，同步上游后手动更新 ref。
+  # ref 必须包含用 Go >= 1.26.3 重建的 libgojni：Go 1.26.0/1.26.1 在 32 位
+  # Android 8.0-10 上会触发 seccomp（futex_time64）SIGSYS 启动闪退，见 fork
+  # 分支 fix/android9-armv7（issue #15）。
   openhongguo:
     git:
       url: https://github.com/Sxuan-Coder/openhongguo.git
       path: bindings/flutter
-      ref: 6f5a515
+      ref: d55bb5f
   flutter_riverpod: ^3.4.3
   media_kit: ^1.2.6
   media_kit_video: ^2.0.1
