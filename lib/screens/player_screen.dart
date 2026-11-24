@@ -110,6 +110,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   PlaybackBundle? _bundle;
   StreamInfo? _currentStream;
 
+  /// 当前启动所解析的分集 id（App 侧请求用的 id；bundle 里的 episodeId
+  /// 由服务端回填，可能为空）。作废解析缓存时用它。
+  String _resolvedEpisodeId = '';
+
   /// 相邻集预解析缓存：只缓存解析结果，不建第二个 Player。
   ///
   /// Android 的 `vo=mediacodec_embed` 在真机上无法稳定共存两路视频输出，
@@ -624,6 +628,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         throw StateError('没有可用分集');
       }
       _episode = episode.number;
+      _resolvedEpisodeId = episode.id;
 
       // 优先复用相邻集预解析结果：解析额度是限量的，切集不再重复请求。
       PlaybackBundle? cached;
@@ -664,7 +669,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           }
           if (mounted && token == _bootToken) {
             unawaited(
-              _boot(
+              _retryWithoutCache(
                 stream: stream,
                 resumeFrom: resumeFrom,
                 playWhenReady: playWhenReady,
@@ -725,7 +730,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (usedCachedBundle && !isQualitySwitch) {
         // 预取地址有时效，暂停久了可能已过期：丢弃缓存按正常链路重试一次。
         unawaited(
-          _boot(
+          _retryWithoutCache(
             stream: stream,
             resumeFrom: resumeFrom,
             playWhenReady: playWhenReady,
@@ -747,7 +752,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       }
       if (usedCachedBundle && !isQualitySwitch) {
         unawaited(
-          _boot(
+          _retryWithoutCache(
             stream: stream,
             resumeFrom: resumeFrom,
             playWhenReady: playWhenReady,
@@ -838,14 +843,34 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
   }
 
+  /// 复用的预取地址开流 / 启动失败：先作废该集在仓库里的解析缓存再重试。
+  /// 只作废这一集——仓库缓存不淘汰，不作废的话 [._boot] 会拿回同一个
+  /// 失效地址；整库作废则会丢掉其余分集已解析的结果。
+  Future<void> _retryWithoutCache({
+    StreamInfo? stream,
+    Duration resumeFrom = Duration.zero,
+    bool playWhenReady = true,
+  }) {
+    if (_resolvedEpisodeId.isNotEmpty) {
+      ref.read(playbackRepositoryProvider).invalidate(_resolvedEpisodeId);
+    }
+    return _boot(
+      stream: stream,
+      resumeFrom: resumeFrom,
+      playWhenReady: playWhenReady,
+    );
+  }
+
   /// 切档失败兜底：流 URL 带 expiresAt，过期是失败主因。
-  /// 作废解析缓存（下次 resolve 强制重新拉取），提示后用新地址重试一次；
+  /// 作废本集的解析缓存（下次 resolve 强制重新拉取），提示后用新地址重试一次；
   /// 重试再失败则落到通用错误态，不无限递归。
   Future<void> _handleSwitchFailure(
     StreamInfo? target,
     Duration resumeFrom,
   ) async {
-    ref.invalidate(playbackRepositoryProvider);
+    if (_resolvedEpisodeId.isNotEmpty) {
+      ref.read(playbackRepositoryProvider).invalidate(_resolvedEpisodeId);
+    }
     if (mounted) {
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()

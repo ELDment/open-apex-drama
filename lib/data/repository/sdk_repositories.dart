@@ -101,7 +101,12 @@ class SdkCatalogRepository implements CatalogRepository {
   }
 
   /// 季数按合集 id 缓存：同合集的不同季、重复搜索都只查一次。
+  /// 单季（0）同样写入，否则每次搜索都会对它重新探测。
   final Map<String, int> _seasonCountCache = <String, int>{};
+
+  /// 探测失败的合集与失败时间；冷却期内不再重试，过期后允许再探一次。
+  final Map<String, DateTime> _seasonProbeFailedAt = <String, DateTime>{};
+  static const Duration _seasonProbeRetryAfter = Duration(minutes: 10);
 
   /// 单页最多补几部剧的季数。seasons() 内部不止一次请求，而匿名设备的
   /// 目录额度有限，不能对每个结果都查。
@@ -145,12 +150,28 @@ class SdkCatalogRepository implements CatalogRepository {
       for (final SeriesSummary item in items)
         if (titleMatchesQuery(item.title, query) &&
             (details[item.id]?.series?.isMultiSeason ?? false) &&
-            !_seasonCountCache.containsKey(_seasonKey(item.id, details[item.id])))
+            _needsSeasonProbe(item.id, details[item.id]))
           item.id,
     ].take(_seasonCountProbeLimit).toList();
     await Future.wait<void>(<Future<void>>[
       for (final String id in candidates) _probeSeasonCount(client, id, details[id]),
     ]);
+  }
+
+  bool _needsSeasonProbe(String seriesId, SeriesDetail? detail) {
+    final String key = _seasonKey(seriesId, detail);
+    if (_seasonCountCache.containsKey(key)) {
+      return false;
+    }
+    final DateTime? failedAt = _seasonProbeFailedAt[key];
+    if (failedAt == null) {
+      return true;
+    }
+    if (DateTime.now().difference(failedAt) < _seasonProbeRetryAfter) {
+      return false;
+    }
+    _seasonProbeFailedAt.remove(key);
+    return true;
   }
 
   Future<void> _probeSeasonCount(
@@ -163,11 +184,11 @@ class SdkCatalogRepository implements CatalogRepository {
       final int count = album.seasonCount > 0
           ? album.seasonCount
           : album.seasons.length;
-      if (count > 1) {
-        _seasonCountCache[_seasonKey(seriesId, detail)] = count;
-      }
+      _seasonCountCache[_seasonKey(seriesId, detail)] = count;
     } catch (_) {
-      // 季接口失败不影响搜索结果本身，卡片不显示季数即可。
+      // 季接口失败不影响搜索结果本身，卡片不显示季数即可；
+      // 只记下失败时间，冷却期内不重复探测。
+      _seasonProbeFailedAt[_seasonKey(seriesId, detail)] = DateTime.now();
     }
   }
 
@@ -263,14 +284,26 @@ class SdkCatalogRepository implements CatalogRepository {
   static const Duration _detailCacheTtl = Duration(minutes: 10);
   static const int _detailCacheLimit = 40;
   final Map<String, _CachedDetail> _detailCache = <String, _CachedDetail>{};
+
+  /// 进行中的详情请求：同一部剧的并发调用复用同一个 Future，
+  /// 不各自消耗一次目录额度。
+  final Map<String, Future<SeriesDetailData>> _detailInFlight =
+      <String, Future<SeriesDetailData>>{};
   final Map<String, _CachedFeed> _kindFeedCache = <String, _CachedFeed>{};
 
   @override
-  Future<SeriesDetailData> seriesDetail(String seriesId) async {
+  Future<SeriesDetailData> seriesDetail(String seriesId) {
     final _CachedDetail? cached = _detailCache[seriesId];
     if (cached != null && cached.isFresh) {
-      return cached.data;
+      return Future<SeriesDetailData>.value(cached.data);
     }
+    return _detailInFlight[seriesId] ??= _fetchDetail(seriesId).whenComplete(
+      () => _detailInFlight.remove(seriesId),
+    );
+  }
+
+  Future<SeriesDetailData> _fetchDetail(String seriesId) async {
+    final _CachedDetail? cached = _detailCache[seriesId];
     try {
       final SeriesDetailData data = await _guard<SeriesDetailData>((
         OpenhongguoClient client,
@@ -493,12 +526,29 @@ class SdkRankRepository implements RankRepository {
 }
 
 /// 播放解析：按分集缓存结果（匿名设备额度有限，绝不重复解析）。
+///
+/// 缓存只在两种情况下让路：服务端给了 [PlaybackBundle.expiresAt] 且已到期，
+/// 或调用方开流失败后显式调用 [invalidate]。未给出失效时间的地址按长期有效处理。
 class SdkPlaybackRepository implements PlaybackRepository {
-  SdkPlaybackRepository({OpenhongguoService? service})
-      : _service = service ?? OpenhongguoService.instance;
+  SdkPlaybackRepository({
+    OpenhongguoService? service,
+    DateTime Function()? now,
+    List<Duration>? resolveBackoff,
+  })  : _service = service ?? OpenhongguoService.instance,
+        _now = now ?? DateTime.now,
+        _backoff = resolveBackoff ?? _resolveBackoff;
 
   final OpenhongguoService _service;
+  final DateTime Function() _now;
+  final List<Duration> _backoff;
   final Map<String, PlaybackBundle> _cache = <String, PlaybackBundle>{};
+
+  /// 进行中的解析：并发请求同一集只发一次。
+  final Map<String, Future<PlaybackBundle>> _inFlight =
+      <String, Future<PlaybackBundle>>{};
+
+  /// 到期前多久就视为过期：开流本身要花时间，卡着到期点取出的地址拉不动。
+  static const Duration _expiryMargin = Duration(seconds: 30);
 
   Future<T> _guard<T>(Future<T> Function(OpenhongguoClient client) run) async {
     try {
@@ -561,12 +611,38 @@ class SdkPlaybackRepository implements PlaybackRepository {
     }
   }
 
+  /// 已缓存的地址是否还能用。expiresAt 为 0 表示服务端没给失效时间，
+  /// 此时只能继续复用（重新解析要消耗额度），交给开流失败后的
+  /// [invalidate] 兜底。
+  bool _isUsable(PlaybackBundle bundle) {
+    if (bundle.expiresAt <= 0) {
+      return true;
+    }
+    final int nowSeconds = _now().millisecondsSinceEpoch ~/ 1000;
+    return bundle.expiresAt - nowSeconds > _expiryMargin.inSeconds;
+  }
+
   @override
-  Future<PlaybackBundle> resolve(String episodeId) async {
+  void invalidate(String episodeId) {
+    _cache.remove(episodeId);
+  }
+
+  @override
+  Future<PlaybackBundle> resolve(String episodeId) {
     final PlaybackBundle? cached = _cache[episodeId];
     if (cached != null) {
-      return cached;
+      if (_isUsable(cached)) {
+        return Future<PlaybackBundle>.value(cached);
+      }
+      _logResolve('expired episode=$episodeId expiresAt=${cached.expiresAt}');
+      _cache.remove(episodeId);
     }
+    return _inFlight[episodeId] ??= _resolveWithRetry(episodeId).whenComplete(
+      () => _inFlight.remove(episodeId),
+    );
+  }
+
+  Future<PlaybackBundle> _resolveWithRetry(String episodeId) async {
     for (int attempt = 0; ; attempt++) {
       try {
         final PlaybackBundle bundle = await _guard<PlaybackBundle>(
@@ -591,11 +667,10 @@ class SdkPlaybackRepository implements PlaybackRepository {
         _logResolve(
           'fail episode=$episodeId attempt=$attempt error=$error',
         );
-        if (!_retryableResolve(error.code) ||
-            attempt >= _resolveBackoff.length) {
+        if (!_retryableResolve(error.code) || attempt >= _backoff.length) {
           rethrow;
         }
-        await Future<void>.delayed(_resolveBackoff[attempt]);
+        await Future<void>.delayed(_backoff[attempt]);
       }
     }
   }
