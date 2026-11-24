@@ -15,10 +15,14 @@ import 'repositories.dart';
 
 /// 基于水果端 SDK 的实现。
 class SdkCatalogRepository implements CatalogRepository {
-  SdkCatalogRepository({OpenhongguoService? service})
-      : _service = service ?? OpenhongguoService.instance;
+  SdkCatalogRepository({OpenhongguoService? service, DateTime Function()? now})
+      : _service = service ?? OpenhongguoService.instance,
+        _now = now ?? DateTime.now;
 
   final OpenhongguoService _service;
+
+  /// 季数探测冷却用的时间源；可注入便于测试。
+  final DateTime Function() _now;
 
   Future<T> _guard<T>(Future<T> Function(OpenhongguoClient client) run) async {
     try {
@@ -101,7 +105,12 @@ class SdkCatalogRepository implements CatalogRepository {
   }
 
   /// 季数按合集 id 缓存：同合集的不同季、重复搜索都只查一次。
+  /// 单季（0）同样写入，否则每次搜索都会对它重新探测。
   final Map<String, int> _seasonCountCache = <String, int>{};
+
+  /// 探测失败的合集与失败时间；冷却期内不再重试，过期后允许再探一次。
+  final Map<String, DateTime> _seasonProbeFailedAt = <String, DateTime>{};
+  static const Duration _seasonProbeRetryAfter = Duration(minutes: 10);
 
   /// 单页最多补几部剧的季数。seasons() 内部不止一次请求，而匿名设备的
   /// 目录额度有限，不能对每个结果都查。
@@ -145,12 +154,28 @@ class SdkCatalogRepository implements CatalogRepository {
       for (final SeriesSummary item in items)
         if (titleMatchesQuery(item.title, query) &&
             (details[item.id]?.series?.isMultiSeason ?? false) &&
-            !_seasonCountCache.containsKey(_seasonKey(item.id, details[item.id])))
+            _needsSeasonProbe(item.id, details[item.id]))
           item.id,
     ].take(_seasonCountProbeLimit).toList();
     await Future.wait<void>(<Future<void>>[
       for (final String id in candidates) _probeSeasonCount(client, id, details[id]),
     ]);
+  }
+
+  bool _needsSeasonProbe(String seriesId, SeriesDetail? detail) {
+    final String key = _seasonKey(seriesId, detail);
+    if (_seasonCountCache.containsKey(key)) {
+      return false;
+    }
+    final DateTime? failedAt = _seasonProbeFailedAt[key];
+    if (failedAt == null) {
+      return true;
+    }
+    if (_now().difference(failedAt) < _seasonProbeRetryAfter) {
+      return false;
+    }
+    _seasonProbeFailedAt.remove(key);
+    return true;
   }
 
   Future<void> _probeSeasonCount(
@@ -163,11 +188,18 @@ class SdkCatalogRepository implements CatalogRepository {
       final int count = album.seasonCount > 0
           ? album.seasonCount
           : album.seasons.length;
-      if (count > 1) {
-        _seasonCountCache[_seasonKey(seriesId, detail)] = count;
+      final String key = _seasonKey(seriesId, detail);
+      if (count > 0) {
+        _seasonCountCache[key] = count;
+      } else {
+        // 查到了但一季都没有：多半是服务端抖动，按失败处理（冷却后再探），
+        // 否则 0 被永久记住，卡片再也不显示季数。
+        _seasonProbeFailedAt[key] = _now();
       }
     } catch (_) {
-      // 季接口失败不影响搜索结果本身，卡片不显示季数即可。
+      // 季接口失败不影响搜索结果本身，卡片不显示季数即可；
+      // 只记下失败时间，冷却期内不重复探测。
+      _seasonProbeFailedAt[_seasonKey(seriesId, detail)] = _now();
     }
   }
 
@@ -263,14 +295,28 @@ class SdkCatalogRepository implements CatalogRepository {
   static const Duration _detailCacheTtl = Duration(minutes: 10);
   static const int _detailCacheLimit = 40;
   final Map<String, _CachedDetail> _detailCache = <String, _CachedDetail>{};
+
+  /// 进行中的详情请求：同一部剧的并发调用复用同一个 Future，
+  /// 不各自消耗一次目录额度。
+  final Map<String, Future<SeriesDetailData>> _detailInFlight =
+      <String, Future<SeriesDetailData>>{};
   final Map<String, _CachedFeed> _kindFeedCache = <String, _CachedFeed>{};
 
   @override
-  Future<SeriesDetailData> seriesDetail(String seriesId) async {
+  Future<SeriesDetailData> seriesDetail(String seriesId) {
     final _CachedDetail? cached = _detailCache[seriesId];
     if (cached != null && cached.isFresh) {
-      return cached.data;
+      return Future<SeriesDetailData>.value(cached.data);
     }
+    return _detailInFlight[seriesId] ??= _dedupe(
+      _detailInFlight,
+      seriesId,
+      () => _fetchDetail(seriesId),
+    );
+  }
+
+  Future<SeriesDetailData> _fetchDetail(String seriesId) async {
+    final _CachedDetail? cached = _detailCache[seriesId];
     try {
       final SeriesDetailData data = await _guard<SeriesDetailData>((
         OpenhongguoClient client,
@@ -493,12 +539,43 @@ class SdkRankRepository implements RankRepository {
 }
 
 /// 播放解析：按分集缓存结果（匿名设备额度有限，绝不重复解析）。
+///
+/// 缓存只在两种情况下让路：服务端给了 [PlaybackBundle.expiresAt] 且已到期，
+/// 或调用方开流失败后显式调用 [invalidate]。未给出失效时间的地址按长期有效处理。
 class SdkPlaybackRepository implements PlaybackRepository {
-  SdkPlaybackRepository({OpenhongguoService? service})
-      : _service = service ?? OpenhongguoService.instance;
+  SdkPlaybackRepository({
+    OpenhongguoService? service,
+    DateTime Function()? now,
+    List<Duration>? resolveBackoff,
+  })  : _service = service ?? OpenhongguoService.instance,
+        _now = now ?? DateTime.now,
+        _backoff = resolveBackoff ?? _resolveBackoff;
 
   final OpenhongguoService _service;
+  final DateTime Function() _now;
+  final List<Duration> _backoff;
   final Map<String, PlaybackBundle> _cache = <String, PlaybackBundle>{};
+
+  /// 按集的作废计数：[invalidate] 某一集时该集自增，用来识别「作废之前就开始」
+  /// 的解析结果。只记被作废过的集，所以不会随解析次数增长。
+  final Map<String, int> _cacheEpoch = <String, int>{};
+
+  /// 进行中的解析：并发请求同一集只发一次。
+  final Map<String, Future<PlaybackBundle>> _inFlight =
+      <String, Future<PlaybackBundle>>{};
+
+  /// 到期前多久就视为过期：开流本身要花时间，卡着到期点取出的地址拉不动。
+  static const Duration _expiryMargin = Duration(seconds: 30);
+
+  /// 分集列表缓存：播放器每次切集 / 重试启动都会重新取一遍列表，而
+  /// listEpisodes 是分页接口（百集剧要翻多页）。列表几乎不变，按剧缓存一段时间；
+  /// 过期后刷新失败时退回旧列表，不影响切集。
+  static const Duration _episodesCacheTtl = Duration(minutes: 10);
+  static const int _episodesCacheLimit = 20;
+  final Map<String, _CachedEpisodes> _episodesCache =
+      <String, _CachedEpisodes>{};
+  final Map<String, Future<List<EpisodeInfo>>> _episodesInFlight =
+      <String, Future<List<EpisodeInfo>>>{};
 
   Future<T> _guard<T>(Future<T> Function(OpenhongguoClient client) run) async {
     try {
@@ -510,9 +587,52 @@ class SdkPlaybackRepository implements PlaybackRepository {
   }
 
   @override
-  Future<List<EpisodeInfo>> episodes(String seriesId) async {
-    try {
-      return await _guard<List<EpisodeInfo>>((OpenhongguoClient client) async {
+  Future<List<EpisodeInfo>> episodes(String seriesId) {
+    final _CachedEpisodes? cached = _episodesCache[seriesId];
+    if (cached != null && cached.isFresh) {
+      return Future<List<EpisodeInfo>>.value(cached.items);
+    }
+    return _dedupe(_episodesInFlight, seriesId, () async {
+      try {
+        final List<EpisodeInfo> items = await _fetchEpisodes(seriesId);
+        // 服务端偶发返回空列表；本地有旧列表时沿用旧列表，不把空结果交出去。
+        if (items.isEmpty && cached != null) {
+          return _keepStale(cached);
+        }
+        if (items.isNotEmpty) {
+          _rememberEpisodes(seriesId, items);
+        }
+        return items;
+      } catch (error) {
+        _logResolve('episodes fail series=$seriesId error=$error');
+        if (cached != null) {
+          return _keepStale(cached);
+        }
+        rethrow;
+      }
+    });
+  }
+
+  /// 沿用旧列表时顺延它的有效期：网络持续异常时不必每次切集都重试一遍。
+  List<EpisodeInfo> _keepStale(_CachedEpisodes cached) {
+    cached.at = _now();
+    return cached.items;
+  }
+
+  void _rememberEpisodes(String seriesId, List<EpisodeInfo> items) {
+    if (_episodesCache.length >= _episodesCacheLimit) {
+      _episodesCache.remove(
+        _episodesCache.keys.reduce(
+          (String a, String b) =>
+              _episodesCache[a]!.at.isBefore(_episodesCache[b]!.at) ? a : b,
+        ),
+      );
+    }
+    _episodesCache[seriesId] = _CachedEpisodes(items, _now);
+  }
+
+  Future<List<EpisodeInfo>> _fetchEpisodes(String seriesId) {
+    return _guard<List<EpisodeInfo>>((OpenhongguoClient client) async {
         // listEpisodes 是分页接口（默认一页 20 条），必须按 cursor 翻页
         // 拉全，否则百集剧只显示首页 20 集。上限防御：单剧最多 50 页。
         final List<EpisodeInfo> all = <EpisodeInfo>[];
@@ -531,11 +651,7 @@ class SdkPlaybackRepository implements PlaybackRepository {
           cursor = result.cursor;
         }
         return all;
-      });
-    } catch (error) {
-      _logResolve('episodes fail series=$seriesId error=$error');
-      rethrow;
-    }
+    });
   }
 
   /// 解析重试退避：服务端播放接口会间歇性返回空结果或 5xx（实测成片出现，
@@ -561,12 +677,44 @@ class SdkPlaybackRepository implements PlaybackRepository {
     }
   }
 
+  /// 已缓存的地址是否还能用。expiresAt 为 0 表示服务端没给失效时间，
+  /// 此时只能继续复用（重新解析要消耗额度），交给开流失败后的
+  /// [invalidate] 兜底。
+  bool _isUsable(PlaybackBundle bundle) {
+    if (bundle.expiresAt <= 0) {
+      return true;
+    }
+    final int nowSeconds = _now().millisecondsSinceEpoch ~/ 1000;
+    return bundle.expiresAt - nowSeconds > _expiryMargin.inSeconds;
+  }
+
   @override
-  Future<PlaybackBundle> resolve(String episodeId) async {
+  void invalidate(String episodeId) {
+    _cacheEpoch[episodeId] = (_cacheEpoch[episodeId] ?? 0) + 1;
+    _cache.remove(episodeId);
+    // 该集若还在解析中，让后续请求另起一次；旧请求完成时因计数已变不会回写缓存。
+    _inFlight.remove(episodeId);
+  }
+
+  @override
+  Future<PlaybackBundle> resolve(String episodeId) {
     final PlaybackBundle? cached = _cache[episodeId];
     if (cached != null) {
-      return cached;
+      if (_isUsable(cached)) {
+        return Future<PlaybackBundle>.value(cached);
+      }
+      _logResolve('expired episode=$episodeId expiresAt=${cached.expiresAt}');
+      _cache.remove(episodeId);
     }
+    final int epoch = _cacheEpoch[episodeId] ?? 0;
+    return _dedupe(
+      _inFlight,
+      episodeId,
+      () => _resolveWithRetry(episodeId, epoch),
+    );
+  }
+
+  Future<PlaybackBundle> _resolveWithRetry(String episodeId, int epoch) async {
     for (int attempt = 0; ; attempt++) {
       try {
         final PlaybackBundle bundle = await _guard<PlaybackBundle>(
@@ -576,7 +724,7 @@ class SdkPlaybackRepository implements PlaybackRepository {
             return bundleFrom(result);
           },
         );
-        if (bundle.streams.isNotEmpty) {
+        if (bundle.streams.isNotEmpty && epoch == (_cacheEpoch[episodeId] ?? 0)) {
           _cache[episodeId] = bundle;
         }
         final String codecs = bundle.streams
@@ -591,11 +739,10 @@ class SdkPlaybackRepository implements PlaybackRepository {
         _logResolve(
           'fail episode=$episodeId attempt=$attempt error=$error',
         );
-        if (!_retryableResolve(error.code) ||
-            attempt >= _resolveBackoff.length) {
+        if (!_retryableResolve(error.code) || attempt >= _backoff.length) {
           rethrow;
         }
-        await Future<void>.delayed(_resolveBackoff[attempt]);
+        await Future<void>.delayed(_backoff[attempt]);
       }
     }
   }
@@ -656,6 +803,31 @@ class SdkPlaybackRepository implements PlaybackRepository {
   }
 }
 
+/// 同一 key 并发调用共享一个进行中的请求，结束后（成功或失败）移除。
+///
+/// 注意不能用 `map[k] ??= run().whenComplete(() => map.remove(k))`：
+/// `remove` 会返回那个 Future 本身，whenComplete 把它当成要等待的结果，
+/// 形成自等待，Future 永远不完成。
+Future<T> _dedupe<T>(
+  Map<String, Future<T>> inFlight,
+  String key,
+  Future<T> Function() run,
+) {
+  final Future<T>? existing = inFlight[key];
+  if (existing != null) {
+    return existing;
+  }
+  late final Future<T> created;
+  created = run().whenComplete(() {
+    // 只摘除自己：key 上可能已被 invalidate 后的新请求替换。
+    if (identical(inFlight[key], created)) {
+      inFlight.remove(key);
+    }
+  });
+  inFlight[key] = created;
+  return created;
+}
+
 /// 带过期时间的详情缓存。
 class _CachedDetail {
   _CachedDetail(this.data) : at = DateTime.now();
@@ -665,6 +837,22 @@ class _CachedDetail {
 
   bool get isFresh =>
       DateTime.now().difference(at) < SdkCatalogRepository._detailCacheTtl;
+}
+
+/// 带过期时间的分集列表缓存；时间源由仓库注入，便于测试。
+class _CachedEpisodes {
+  _CachedEpisodes(this.items, DateTime Function() now)
+      : _now = now,
+        at = now();
+
+  final List<EpisodeInfo> items;
+  final DateTime Function() _now;
+
+  /// 入缓存（或最近一次被沿用）的时间。
+  DateTime at;
+
+  bool get isFresh =>
+      _now().difference(at) < SdkPlaybackRepository._episodesCacheTtl;
 }
 
 /// 带过期时间的频道列表缓存。
