@@ -552,6 +552,16 @@ class SdkPlaybackRepository implements PlaybackRepository {
   /// 到期前多久就视为过期：开流本身要花时间，卡着到期点取出的地址拉不动。
   static const Duration _expiryMargin = Duration(seconds: 30);
 
+  /// 分集列表缓存：播放器每次切集 / 重试启动都会重新取一遍列表，而
+  /// listEpisodes 是分页接口（百集剧要翻多页）。列表几乎不变，按剧缓存一段时间；
+  /// 过期后刷新失败时退回旧列表，不影响切集。
+  static const Duration _episodesCacheTtl = Duration(minutes: 10);
+  static const int _episodesCacheLimit = 20;
+  final Map<String, _CachedEpisodes> _episodesCache =
+      <String, _CachedEpisodes>{};
+  final Map<String, Future<List<EpisodeInfo>>> _episodesInFlight =
+      <String, Future<List<EpisodeInfo>>>{};
+
   Future<T> _guard<T>(Future<T> Function(OpenhongguoClient client) run) async {
     try {
       final OpenhongguoClient client = await _service.client();
@@ -562,9 +572,42 @@ class SdkPlaybackRepository implements PlaybackRepository {
   }
 
   @override
-  Future<List<EpisodeInfo>> episodes(String seriesId) async {
-    try {
-      return await _guard<List<EpisodeInfo>>((OpenhongguoClient client) async {
+  Future<List<EpisodeInfo>> episodes(String seriesId) {
+    final _CachedEpisodes? cached = _episodesCache[seriesId];
+    if (cached != null && cached.isFresh) {
+      return Future<List<EpisodeInfo>>.value(cached.items);
+    }
+    return _dedupe(_episodesInFlight, seriesId, () async {
+      try {
+        final List<EpisodeInfo> items = await _fetchEpisodes(seriesId);
+        if (items.isNotEmpty) {
+          _rememberEpisodes(seriesId, items);
+        }
+        return items;
+      } catch (error) {
+        _logResolve('episodes fail series=$seriesId error=$error');
+        if (cached != null) {
+          return cached.items;
+        }
+        rethrow;
+      }
+    });
+  }
+
+  void _rememberEpisodes(String seriesId, List<EpisodeInfo> items) {
+    if (_episodesCache.length >= _episodesCacheLimit) {
+      _episodesCache.remove(
+        _episodesCache.keys.reduce(
+          (String a, String b) =>
+              _episodesCache[a]!.at.isBefore(_episodesCache[b]!.at) ? a : b,
+        ),
+      );
+    }
+    _episodesCache[seriesId] = _CachedEpisodes(items, _now);
+  }
+
+  Future<List<EpisodeInfo>> _fetchEpisodes(String seriesId) {
+    return _guard<List<EpisodeInfo>>((OpenhongguoClient client) async {
         // listEpisodes 是分页接口（默认一页 20 条），必须按 cursor 翻页
         // 拉全，否则百集剧只显示首页 20 集。上限防御：单剧最多 50 页。
         final List<EpisodeInfo> all = <EpisodeInfo>[];
@@ -583,11 +626,7 @@ class SdkPlaybackRepository implements PlaybackRepository {
           cursor = result.cursor;
         }
         return all;
-      });
-    } catch (error) {
-      _logResolve('episodes fail series=$seriesId error=$error');
-      rethrow;
-    }
+    });
   }
 
   /// 解析重试退避：服务端播放接口会间歇性返回空结果或 5xx（实测成片出现，
@@ -761,6 +800,20 @@ class _CachedDetail {
 
   bool get isFresh =>
       DateTime.now().difference(at) < SdkCatalogRepository._detailCacheTtl;
+}
+
+/// 带过期时间的分集列表缓存；时间源由仓库注入，便于测试。
+class _CachedEpisodes {
+  _CachedEpisodes(this.items, DateTime Function() now)
+      : _now = now,
+        at = now();
+
+  final List<EpisodeInfo> items;
+  final DateTime Function() _now;
+  final DateTime at;
+
+  bool get isFresh =>
+      _now().difference(at) < SdkPlaybackRepository._episodesCacheTtl;
 }
 
 /// 带过期时间的频道列表缓存。

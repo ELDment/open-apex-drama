@@ -14,6 +14,9 @@ class _FakeClient implements OpenhongguoClient {
   final List<Future<PlaybackResult> Function()> resolveSteps =
       <Future<PlaybackResult> Function()>[];
   bool seasonsFail = false;
+
+  int episodesCalls = 0;
+  bool episodesFail = false;
   int resolveCalls = 0;
   final List<String> resolveIds = <String>[];
 
@@ -77,6 +80,25 @@ class _FakeClient implements OpenhongguoClient {
       items: <SeriesSummary>[
         const SeriesSummary(id: 's1', title: '测试剧', episodeCount: 10),
       ],
+      cursor: '',
+      hasMore: false,
+    );
+  }
+
+  @override
+  Future<PagedResult<Episode>> listEpisodes(
+    String seriesId, [
+    EpisodeOptions options = const EpisodeOptions(),
+  ]) async {
+    episodesCalls++;
+    if (episodesFail) {
+      throw OpenhongguoException(ErrorCode.transport, '网络抖动');
+    }
+    return PagedResult<Episode>(
+      items: List<Episode>.generate(
+        3,
+        (int i) => Episode(id: '$seriesId-ep${i + 1}', number: i + 1),
+      ),
       cursor: '',
       hasMore: false,
     );
@@ -289,6 +311,61 @@ void main() {
         r.resolve('ep1'),
         throwsA(isA<ApiException>()),
       );
+    });
+  });
+
+  group('分集列表缓存', () {
+    test('同一部剧反复取列表只请求一次', () async {
+      final SdkPlaybackRepository r = repo();
+      await r.episodes('s1');
+      await r.episodes('s1');
+      await r.episodes('s1');
+
+      expect(client.episodesCalls, 1);
+    });
+
+    test('并发取同一部剧的列表只请求一次', () async {
+      final SdkPlaybackRepository r = repo();
+
+      await Future.wait(<Future<List<EpisodeInfo>>>[
+        r.episodes('s1'),
+        r.episodes('s1'),
+      ]);
+
+      expect(client.episodesCalls, 1);
+    });
+
+    test('缓存过期后重新拉取', () async {
+      final SdkPlaybackRepository r = repo();
+      await r.episodes('s1');
+
+      now = now.add(const Duration(minutes: 11));
+      await r.episodes('s1');
+
+      expect(client.episodesCalls, 2);
+    });
+
+    test('过期后刷新失败时退回旧列表', () async {
+      final SdkPlaybackRepository r = repo();
+      await r.episodes('s1');
+
+      client.episodesFail = true;
+      now = now.add(const Duration(minutes: 11));
+      final List<EpisodeInfo> items = await r.episodes('s1');
+
+      expect(items, hasLength(3));
+      expect(client.episodesCalls, 2);
+    });
+
+    test('没有缓存时拉取失败照常抛错', () async {
+      client.episodesFail = true;
+      final SdkPlaybackRepository r = repo();
+
+      await expectLater(
+        r.episodes('s1'),
+        throwsA(isA<ApiException>()),
+      );
+      expect(client.episodesCalls, 1);
     });
   });
 
