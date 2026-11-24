@@ -17,6 +17,7 @@ class _FakeClient implements OpenhongguoClient {
 
   int episodesCalls = 0;
   bool episodesFail = false;
+  bool episodesEmpty = false;
   int resolveCalls = 0;
   final List<String> resolveIds = <String>[];
 
@@ -96,7 +97,7 @@ class _FakeClient implements OpenhongguoClient {
     }
     return PagedResult<Episode>(
       items: List<Episode>.generate(
-        3,
+        episodesEmpty ? 0 : 3,
         (int i) => Episode(id: '$seriesId-ep${i + 1}', number: i + 1),
       ),
       cursor: '',
@@ -249,6 +250,29 @@ void main() {
       expect(client.resolveCalls, 3);
     });
 
+    test('解析进行中时作废：后续请求另起一次，旧结果不回写缓存', () async {
+      final Completer<void> gate = Completer<void>();
+      client.resolveSteps.add(() async {
+        await gate.future;
+        return _result('stale');
+      });
+      client.resolveSteps.add(() => _ok('fresh'));
+      final SdkPlaybackRepository r = repo();
+
+      final Future<PlaybackBundle> stale = r.resolve('ep1');
+      // 让第一次请求真正发出并挂起。
+      await Future<void>.delayed(Duration.zero);
+      r.invalidate('ep1');
+      final PlaybackBundle fresh = await r.resolve('ep1');
+      gate.complete();
+      await stale;
+      final PlaybackBundle again = await r.resolve('ep1');
+
+      expect(fresh.preferred?.url, 'fresh');
+      expect(again.preferred?.url, 'fresh');
+      expect(client.resolveCalls, 2);
+    });
+
     test('服务端给了过期时间且已到期时重新取址', () async {
       client.resolveSteps.add(() => _ok('old', expiresAt: nowSeconds() + 60));
       client.resolveSteps.add(() => _ok('new'));
@@ -350,6 +374,18 @@ void main() {
       await r.episodes('s1');
 
       client.episodesFail = true;
+      now = now.add(const Duration(minutes: 11));
+      final List<EpisodeInfo> items = await r.episodes('s1');
+
+      expect(items, hasLength(3));
+      expect(client.episodesCalls, 2);
+    });
+
+    test('过期后刷新拿到空列表时沿用旧列表', () async {
+      final SdkPlaybackRepository r = repo();
+      await r.episodes('s1');
+
+      client.episodesEmpty = true;
       now = now.add(const Duration(minutes: 11));
       final List<EpisodeInfo> items = await r.episodes('s1');
 

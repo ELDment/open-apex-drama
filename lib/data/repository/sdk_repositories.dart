@@ -184,7 +184,14 @@ class SdkCatalogRepository implements CatalogRepository {
       final int count = album.seasonCount > 0
           ? album.seasonCount
           : album.seasons.length;
-      _seasonCountCache[_seasonKey(seriesId, detail)] = count;
+      final String key = _seasonKey(seriesId, detail);
+      if (count > 0) {
+        _seasonCountCache[key] = count;
+      } else {
+        // 查到了但一季都没有：多半是服务端抖动，按失败处理（冷却后再探），
+        // 否则 0 被永久记住，卡片再也不显示季数。
+        _seasonProbeFailedAt[key] = DateTime.now();
+      }
     } catch (_) {
       // 季接口失败不影响搜索结果本身，卡片不显示季数即可；
       // 只记下失败时间，冷却期内不重复探测。
@@ -545,6 +552,9 @@ class SdkPlaybackRepository implements PlaybackRepository {
   final List<Duration> _backoff;
   final Map<String, PlaybackBundle> _cache = <String, PlaybackBundle>{};
 
+  /// 作废计数：每次 [invalidate] 自增，用来识别「作废之前就开始」的解析结果。
+  int _cacheEpoch = 0;
+
   /// 进行中的解析：并发请求同一集只发一次。
   final Map<String, Future<PlaybackBundle>> _inFlight =
       <String, Future<PlaybackBundle>>{};
@@ -580,6 +590,10 @@ class SdkPlaybackRepository implements PlaybackRepository {
     return _dedupe(_episodesInFlight, seriesId, () async {
       try {
         final List<EpisodeInfo> items = await _fetchEpisodes(seriesId);
+        // 服务端偶发返回空列表；本地有旧列表时沿用旧列表，不把空结果交出去。
+        if (items.isEmpty && cached != null) {
+          return _keepStale(cached);
+        }
         if (items.isNotEmpty) {
           _rememberEpisodes(seriesId, items);
         }
@@ -587,11 +601,17 @@ class SdkPlaybackRepository implements PlaybackRepository {
       } catch (error) {
         _logResolve('episodes fail series=$seriesId error=$error');
         if (cached != null) {
-          return cached.items;
+          return _keepStale(cached);
         }
         rethrow;
       }
     });
+  }
+
+  /// 沿用旧列表时顺延它的有效期：网络持续异常时不必每次切集都重试一遍。
+  List<EpisodeInfo> _keepStale(_CachedEpisodes cached) {
+    cached.at = _now();
+    return cached.items;
   }
 
   void _rememberEpisodes(String seriesId, List<EpisodeInfo> items) {
@@ -665,7 +685,10 @@ class SdkPlaybackRepository implements PlaybackRepository {
 
   @override
   void invalidate(String episodeId) {
+    _cacheEpoch++;
     _cache.remove(episodeId);
+    // 该集若还在解析中，让后续请求另起一次；旧请求完成时因世代已变不会回写缓存。
+    _inFlight.remove(episodeId);
   }
 
   @override
@@ -678,10 +701,15 @@ class SdkPlaybackRepository implements PlaybackRepository {
       _logResolve('expired episode=$episodeId expiresAt=${cached.expiresAt}');
       _cache.remove(episodeId);
     }
-    return _dedupe(_inFlight, episodeId, () => _resolveWithRetry(episodeId));
+    final int epoch = _cacheEpoch;
+    return _dedupe(
+      _inFlight,
+      episodeId,
+      () => _resolveWithRetry(episodeId, epoch),
+    );
   }
 
-  Future<PlaybackBundle> _resolveWithRetry(String episodeId) async {
+  Future<PlaybackBundle> _resolveWithRetry(String episodeId, int epoch) async {
     for (int attempt = 0; ; attempt++) {
       try {
         final PlaybackBundle bundle = await _guard<PlaybackBundle>(
@@ -691,7 +719,7 @@ class SdkPlaybackRepository implements PlaybackRepository {
             return bundleFrom(result);
           },
         );
-        if (bundle.streams.isNotEmpty) {
+        if (bundle.streams.isNotEmpty && epoch == _cacheEpoch) {
           _cache[episodeId] = bundle;
         }
         final String codecs = bundle.streams
@@ -810,7 +838,9 @@ class _CachedEpisodes {
 
   final List<EpisodeInfo> items;
   final DateTime Function() _now;
-  final DateTime at;
+
+  /// 入缓存（或最近一次被沿用）的时间。
+  DateTime at;
 
   bool get isFresh =>
       _now().difference(at) < SdkPlaybackRepository._episodesCacheTtl;

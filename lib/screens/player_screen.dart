@@ -597,6 +597,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       return;
     }
     final int token = ++_bootToken;
+    // 取到本次要播的分集之前为空：这期间若走切档失败兜底，不作废上一集的缓存。
+    _resolvedEpisodeId = '';
     _cachedOpenErrorSub?.cancel();
     _cachedOpenErrorSub = null;
     // 本次是否复用了相邻集预解析结果（失败时丢弃缓存重试一次）。
@@ -1118,6 +1120,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       return;
     }
     _persistProgress(force: true);
+    // 预取的是上一季的地址，只按集号比对复用，不清掉会播错集。
+    _clearPrefetch();
     setState(() {
       _activeDrama = dramaForSeason(widget.drama, season);
       _seriesId = season.seriesId;
