@@ -552,8 +552,9 @@ class SdkPlaybackRepository implements PlaybackRepository {
   final List<Duration> _backoff;
   final Map<String, PlaybackBundle> _cache = <String, PlaybackBundle>{};
 
-  /// 作废计数：每次 [invalidate] 自增，用来识别「作废之前就开始」的解析结果。
-  int _cacheEpoch = 0;
+  /// 按集的作废计数：[invalidate] 某一集时该集自增，用来识别「作废之前就开始」
+  /// 的解析结果。只记被作废过的集，所以不会随解析次数增长。
+  final Map<String, int> _cacheEpoch = <String, int>{};
 
   /// 进行中的解析：并发请求同一集只发一次。
   final Map<String, Future<PlaybackBundle>> _inFlight =
@@ -685,9 +686,9 @@ class SdkPlaybackRepository implements PlaybackRepository {
 
   @override
   void invalidate(String episodeId) {
-    _cacheEpoch++;
+    _cacheEpoch[episodeId] = (_cacheEpoch[episodeId] ?? 0) + 1;
     _cache.remove(episodeId);
-    // 该集若还在解析中，让后续请求另起一次；旧请求完成时因世代已变不会回写缓存。
+    // 该集若还在解析中，让后续请求另起一次；旧请求完成时因计数已变不会回写缓存。
     _inFlight.remove(episodeId);
   }
 
@@ -701,7 +702,7 @@ class SdkPlaybackRepository implements PlaybackRepository {
       _logResolve('expired episode=$episodeId expiresAt=${cached.expiresAt}');
       _cache.remove(episodeId);
     }
-    final int epoch = _cacheEpoch;
+    final int epoch = _cacheEpoch[episodeId] ?? 0;
     return _dedupe(
       _inFlight,
       episodeId,
@@ -719,7 +720,7 @@ class SdkPlaybackRepository implements PlaybackRepository {
             return bundleFrom(result);
           },
         );
-        if (bundle.streams.isNotEmpty && epoch == _cacheEpoch) {
+        if (bundle.streams.isNotEmpty && epoch == (_cacheEpoch[episodeId] ?? 0)) {
           _cache[episodeId] = bundle;
         }
         final String codecs = bundle.streams
@@ -812,8 +813,12 @@ Future<T> _dedupe<T>(
   if (existing != null) {
     return existing;
   }
-  final Future<T> created = run().whenComplete(() {
-    inFlight.remove(key);
+  late final Future<T> created;
+  created = run().whenComplete(() {
+    // 只摘除自己：key 上可能已被 invalidate 后的新请求替换。
+    if (identical(inFlight[key], created)) {
+      inFlight.remove(key);
+    }
   });
   inFlight[key] = created;
   return created;

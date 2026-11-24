@@ -273,6 +273,59 @@ void main() {
       expect(client.resolveCalls, 2);
     });
 
+    test('作废某一集不影响其他集在途解析的缓存', () async {
+      final Completer<void> gate = Completer<void>();
+      client.resolveSteps.add(() async {
+        await gate.future;
+        return _result('b');
+      });
+      client.resolveSteps.add(() => _ok('a'));
+      client.resolveSteps.add(() => _ok('b2'));
+      final SdkPlaybackRepository r = repo();
+
+      final Future<PlaybackBundle> ep2 = r.resolve('ep2');
+      await Future<void>.delayed(Duration.zero);
+      r.invalidate('ep1');
+      await r.resolve('ep1');
+      gate.complete();
+      await ep2;
+      await r.resolve('ep2');
+
+      // ep2 的在途解析照常写进缓存：第三次调用没有再发请求。
+      expect(client.resolveIds, <String>['ep2', 'ep1']);
+    });
+
+    test('旧请求完成时不会摘掉替换它的新请求', () async {
+      final Completer<void> gateA = Completer<void>();
+      final Completer<void> gateB = Completer<void>();
+      client.resolveSteps.add(() async {
+        await gateA.future;
+        return _result('old');
+      });
+      client.resolveSteps.add(() async {
+        await gateB.future;
+        return _result('new');
+      });
+      client.resolveSteps.add(() => _ok('third'));
+      final SdkPlaybackRepository r = repo();
+
+      final Future<PlaybackBundle> old = r.resolve('ep1');
+      await Future<void>.delayed(Duration.zero);
+      r.invalidate('ep1');
+      final Future<PlaybackBundle> fresh = r.resolve('ep1');
+      await Future<void>.delayed(Duration.zero);
+      // 旧请求先完成：不能把表里的新请求摘掉，第三个调用应并入新请求。
+      gateA.complete();
+      await old;
+      final Future<PlaybackBundle> joiner = r.resolve('ep1');
+      gateB.complete();
+      await fresh;
+      await joiner;
+
+      expect(client.resolveCalls, 2);
+      expect((await fresh).preferred?.url, 'new');
+    });
+
     test('服务端给了过期时间且已到期时重新取址', () async {
       client.resolveSteps.add(() => _ok('old', expiresAt: nowSeconds() + 60));
       client.resolveSteps.add(() => _ok('new'));
@@ -378,6 +431,19 @@ void main() {
       final List<EpisodeInfo> items = await r.episodes('s1');
 
       expect(items, hasLength(3));
+      expect(client.episodesCalls, 2);
+    });
+
+    test('沿用旧列表后进入冷却，不逐次重试', () async {
+      final SdkPlaybackRepository r = repo();
+      await r.episodes('s1');
+
+      client.episodesFail = true;
+      now = now.add(const Duration(minutes: 11));
+      await r.episodes('s1');
+      await r.episodes('s1');
+      await r.episodes('s1');
+
       expect(client.episodesCalls, 2);
     });
 
@@ -505,6 +571,18 @@ void main() {
 
     test('单季：同样记住，不重复探测', () async {
       client.seasonsCountForAll = 1;
+      final SdkCatalogRepository r = SdkCatalogRepository(
+        service: _FakeService(client),
+      );
+
+      await search(r);
+      await search(r);
+
+      expect(client.seasonsCalls, 1);
+    });
+
+    test('返回 0 季：按失败冷却，不永久记住', () async {
+      client.seasonsCountForAll = 0;
       final SdkCatalogRepository r = SdkCatalogRepository(
         service: _FakeService(client),
       );

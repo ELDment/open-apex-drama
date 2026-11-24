@@ -1441,6 +1441,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       return;
     }
     _prefetching = true;
+    // 预取期间可能切季：旧季在途的结果不能留给新季（集号相同但不是同一集）。
+    final String seriesId = _seriesId;
     try {
       final EpisodeInfo? info = _episodeByNumber(next);
       if (info == null) {
@@ -1452,7 +1454,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (!mounted || !_isMobilePlatform || _isWideLayout) {
         return;
       }
-      if (_episode != next - 1) {
+      if (_episode != next - 1 || seriesId != _seriesId) {
         return;
       }
       _prefetchedBundle = bundle;
