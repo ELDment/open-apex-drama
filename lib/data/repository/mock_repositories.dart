@@ -202,6 +202,7 @@ class MockPlaybackRepository implements PlaybackRepository {
       durationSeconds: 888,
     );
   }
+
   @override
   Future<List<DanmakuCue>> danmaku(String seriesId, String episodeId) async {
     return const <DanmakuCue>[];

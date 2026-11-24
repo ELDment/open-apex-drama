@@ -727,6 +727,8 @@ class SdkPlaybackRepository implements PlaybackRepository {
         if (bundle.streams.isNotEmpty && epoch == (_cacheEpoch[episodeId] ?? 0)) {
           _cache[episodeId] = bundle;
         }
+        // 记录各清晰度编码：bytevc2 等无法解码的编码会在播放器层
+        // 黑屏，取址日志看不出问题，必须在这里留痕（issue #8）。
         final String codecs = bundle.streams
             .map((StreamInfo s) => '${s.definition}:${s.codec}')
             .join(',');

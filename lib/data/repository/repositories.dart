@@ -65,7 +65,8 @@ abstract class PlaybackRepository {
   Future<PlaybackBundle> resolve(String episodeId);
 
   /// 作废某一集的解析缓存（地址开流失败时调用），下次 [resolve] 重新取址。
-  /// 不影响其他分集的缓存。
+  /// 不影响其他分集的缓存。全档位 bytevc2 等无法解码时，重解析也有机会
+  /// 换到可解码流（服务端按解析时机切换编码，issue #8）。
   void invalidate(String episodeId);
 
   /// 一集的弹幕，按出现时间排序。分页在仓库层翻完；
