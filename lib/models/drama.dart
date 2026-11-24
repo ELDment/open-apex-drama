@@ -16,6 +16,7 @@ class Drama {
     required this.episodeTitles,
     this.coverUrl = '',
     this.badge,
+    this.seasonCount = 0,
   });
 
   final String id;
@@ -40,6 +41,9 @@ class Drama {
   final String coverUrl;
   final List<String> episodeTitles;
   final String? badge;
+
+  /// 所属合集的总季数；0/1 表示单季，卡片上不显示季数角标。
+  final int seasonCount;
 
   String get ratingLabel => rating.toStringAsFixed(1);
 

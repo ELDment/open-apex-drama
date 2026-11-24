@@ -34,11 +34,29 @@ List<Color> paletteFor(String seed) {
   ];
 }
 
+/// SDK content_type → App 的界面类型名。
+///
+/// 详情接口拿到的剧如果只按默认「短剧」映射，漫剧/电影会被标错类型，
+/// 推荐区也会跟着错位。
+String kindForContentType(int value) {
+  switch (value) {
+    case 1004:
+      return '漫剧';
+    case 5:
+      return '电影';
+    case 6:
+      return '电视剧';
+    default:
+      return '短剧';
+  }
+}
+
 /// SeriesSummary（发现/搜索结果条目）→ Drama。
 Drama dramaFromSummary(
   SeriesSummary summary, {
   String kind = '短剧',
   String? coverUrl,
+  int seasonCount = 0,
 }) {
   final String category = summary.category.trim();
   return Drama(
@@ -55,6 +73,7 @@ Drama dramaFromSummary(
     // 搜索接口本身不带封面，调用方可传入补齐后的地址。
     coverUrl: coverUrl ?? summary.coverUrl,
     episodeTitles: const <String>[],
+    seasonCount: seasonCount,
   );
 }
 

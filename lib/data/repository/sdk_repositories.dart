@@ -7,6 +7,7 @@ import '../../models/catalog.dart';
 import '../../models/danmaku_cue.dart';
 import '../../models/drama.dart';
 import '../../models/playback.dart';
+import '../../models/search_results.dart';
 import '../../models/series_detail.dart';
 import '../mappers.dart';
 import '../remote/openhongguo_service.dart';
@@ -14,10 +15,14 @@ import 'repositories.dart';
 
 /// 基于水果端 SDK 的实现。
 class SdkCatalogRepository implements CatalogRepository {
-  SdkCatalogRepository({OpenhongguoService? service})
-      : _service = service ?? OpenhongguoService.instance;
+  SdkCatalogRepository({OpenhongguoService? service, DateTime Function()? now})
+      : _service = service ?? OpenhongguoService.instance,
+        _now = now ?? DateTime.now;
 
   final OpenhongguoService _service;
+
+  /// 季数探测冷却用的时间源；可注入便于测试。
+  final DateTime Function() _now;
 
   Future<T> _guard<T>(Future<T> Function(OpenhongguoClient client) run) async {
     try {
@@ -73,14 +78,25 @@ class SdkCatalogRepository implements CatalogRepository {
           pageSize: pageSize,
         ),
       );
-      final Map<String, String> covers = await _searchCovers(
+      // 官方搜索页会混入帖子 / UGC 视频（episodeCount 为 0），它们不是剧集，
+      // 点开详情会返回 101000 content_gone。搜索结果只保留有集数的条目。
+      final List<SeriesSummary> dramas = <SeriesSummary>[
+        for (final SeriesSummary item in page.items)
+          if (item.episodeCount > 0) item,
+      ];
+      final Map<String, SeriesDetail> details = await _searchDetails(
         client,
-        page.items,
+        dramas,
       );
+      await _primeSeasonCounts(client, dramas, details, query);
       return SearchPage(
         items: <Drama>[
-          for (final SeriesSummary item in page.items)
-            dramaFromSummary(item, coverUrl: covers[item.id]),
+          for (final SeriesSummary item in dramas)
+            dramaFromSummary(
+              item,
+              coverUrl: details[item.id]?.series?.coverUrl,
+              seasonCount: _seasonCountFor(item.id, details[item.id]),
+            ),
         ],
         cursor: page.cursor,
         hasMore: page.hasMore && page.cursor.isNotEmpty,
@@ -88,34 +104,112 @@ class SdkCatalogRepository implements CatalogRepository {
     });
   }
 
+  /// 季数按合集 id 缓存：同合集的不同季、重复搜索都只查一次。
+  /// 单季（0）同样写入，否则每次搜索都会对它重新探测。
+  final Map<String, int> _seasonCountCache = <String, int>{};
 
-  /// 搜索接口不返回封面（SDK 的 ParseSearch 只映射 id/标题/简介/集数），
-  /// 直接渲染会整屏渐变色块。这里用一次 getSeriesBatch 批量补齐；
-  /// 补不到或批量接口失败时保持无封面，不影响搜索结果本身。
-  static Future<Map<String, String>> _searchCovers(
+  /// 探测失败的合集与失败时间；冷却期内不再重试，过期后允许再探一次。
+  final Map<String, DateTime> _seasonProbeFailedAt = <String, DateTime>{};
+  static const Duration _seasonProbeRetryAfter = Duration(minutes: 10);
+
+  /// 单页最多补几部剧的季数。seasons() 内部不止一次请求，而匿名设备的
+  /// 目录额度有限，不能对每个结果都查。
+  static const int _seasonCountProbeLimit = 3;
+
+  /// 搜索接口不返回封面和多季标记（SDK 的 ParseSearch 只映射
+  /// id/标题/简介/集数），直接渲染会整屏渐变色块、也看不出是否多季。
+  /// 这里用一次 getSeriesBatch 批量补齐；失败时保持无封面，不影响结果本身。
+  static Future<Map<String, SeriesDetail>> _searchDetails(
     OpenhongguoClient client,
     List<SeriesSummary> items,
   ) async {
     final List<String> ids = <String>[
       for (final SeriesSummary item in items)
-        if (item.id.isNotEmpty && item.coverUrl.isEmpty) item.id,
+        if (item.id.isNotEmpty) item.id,
     ];
     if (ids.isEmpty) {
-      return const <String, String>{};
+      return const <String, SeriesDetail>{};
     }
     try {
       final List<SeriesDetail> details = await client.getSeriesBatch(ids);
-      return <String, String>{
+      return <String, SeriesDetail>{
         for (final SeriesDetail detail in details)
-          if (detail.series != null &&
-              detail.series!.id.isNotEmpty &&
-              detail.series!.coverUrl.isNotEmpty)
-            detail.series!.id: detail.series!.coverUrl,
+          if (detail.series != null && detail.series!.id.isNotEmpty)
+            detail.series!.id: detail,
       };
     } catch (_) {
-      return const <String, String>{};
+      return const <String, SeriesDetail>{};
     }
   }
+
+  /// 给「标题直接命中且确为多季」的结果补总季数，供卡片显示「共 N 季」。
+  /// 只探测前几部：同名的不同制作版本都会各自给出季数。
+  Future<void> _primeSeasonCounts(
+    OpenhongguoClient client,
+    List<SeriesSummary> items,
+    Map<String, SeriesDetail> details,
+    String query,
+  ) async {
+    final List<String> candidates = <String>[
+      for (final SeriesSummary item in items)
+        if (titleMatchesQuery(item.title, query) &&
+            (details[item.id]?.series?.isMultiSeason ?? false) &&
+            _needsSeasonProbe(item.id, details[item.id]))
+          item.id,
+    ].take(_seasonCountProbeLimit).toList();
+    await Future.wait<void>(<Future<void>>[
+      for (final String id in candidates) _probeSeasonCount(client, id, details[id]),
+    ]);
+  }
+
+  bool _needsSeasonProbe(String seriesId, SeriesDetail? detail) {
+    final String key = _seasonKey(seriesId, detail);
+    if (_seasonCountCache.containsKey(key)) {
+      return false;
+    }
+    final DateTime? failedAt = _seasonProbeFailedAt[key];
+    if (failedAt == null) {
+      return true;
+    }
+    if (_now().difference(failedAt) < _seasonProbeRetryAfter) {
+      return false;
+    }
+    _seasonProbeFailedAt.remove(key);
+    return true;
+  }
+
+  Future<void> _probeSeasonCount(
+    OpenhongguoClient client,
+    String seriesId,
+    SeriesDetail? detail,
+  ) async {
+    try {
+      final Album album = await client.seasons(seriesId);
+      final int count = album.seasonCount > 0
+          ? album.seasonCount
+          : album.seasons.length;
+      final String key = _seasonKey(seriesId, detail);
+      if (count > 0) {
+        _seasonCountCache[key] = count;
+      } else {
+        // 查到了但一季都没有：多半是服务端抖动，按失败处理（冷却后再探），
+        // 否则 0 被永久记住，卡片再也不显示季数。
+        _seasonProbeFailedAt[key] = _now();
+      }
+    } catch (_) {
+      // 季接口失败不影响搜索结果本身，卡片不显示季数即可；
+      // 只记下失败时间，冷却期内不重复探测。
+      _seasonProbeFailedAt[_seasonKey(seriesId, detail)] = _now();
+    }
+  }
+
+  String _seasonKey(String seriesId, SeriesDetail? detail) {
+    final String albumId = detail?.series?.relatedAlbumId ?? '';
+    return albumId.isEmpty ? seriesId : albumId;
+  }
+
+  int _seasonCountFor(String seriesId, SeriesDetail? detail) =>
+      _seasonCountCache[_seasonKey(seriesId, detail)] ?? 0;
 
   @override
   Future<List<String>> suggest(String prefix) {
@@ -196,40 +290,171 @@ class SdkCatalogRepository implements CatalogRepository {
     });
   }
 
+  /// 详情聚合缓存：同一部剧反复进入时直接复用，避免重复消耗匿名目录额度，
+  /// 也避免推荐位每次刷新出不同内容。过期后重新拉取，失败时退回旧数据。
+  static const Duration _detailCacheTtl = Duration(minutes: 10);
+  static const int _detailCacheLimit = 40;
+  final Map<String, _CachedDetail> _detailCache = <String, _CachedDetail>{};
+
+  /// 进行中的详情请求：同一部剧的并发调用复用同一个 Future，
+  /// 不各自消耗一次目录额度。
+  final Map<String, Future<SeriesDetailData>> _detailInFlight =
+      <String, Future<SeriesDetailData>>{};
+  final Map<String, _CachedFeed> _kindFeedCache = <String, _CachedFeed>{};
+
   @override
   Future<SeriesDetailData> seriesDetail(String seriesId) {
-    return _guard<SeriesDetailData>((OpenhongguoClient client) async {
-      // 三个请求并行；多季接口对单季剧会失败，容忍为空。
-      final List<dynamic> results = await Future.wait(<Future<dynamic>>[
-        client.getSeries(seriesId),
-        client.seriesRecommend(seriesId),
-        client
+    final _CachedDetail? cached = _detailCache[seriesId];
+    if (cached != null && cached.isFresh) {
+      return Future<SeriesDetailData>.value(cached.data);
+    }
+    return _detailInFlight[seriesId] ??= _dedupe(
+      _detailInFlight,
+      seriesId,
+      () => _fetchDetail(seriesId),
+    );
+  }
+
+  Future<SeriesDetailData> _fetchDetail(String seriesId) async {
+    final _CachedDetail? cached = _detailCache[seriesId];
+    try {
+      final SeriesDetailData data = await _guard<SeriesDetailData>((
+        OpenhongguoClient client,
+      ) async {
+        // 先取详情确定类型；推荐、多季、同类型频道随后并行发出，
+        // 不再等三个请求全部结束才补推荐。
+        final Series series = await client.getSeries(seriesId);
+        final String kind = kindForContentType(series.contentType.value);
+        final Future<Recommend> recommendFuture = client.seriesRecommend(
+          seriesId,
+        );
+        final Future<Album> albumFuture = client
             .seasons(seriesId)
-            .catchError((Object _) => Album()),
-      ]);
-      final Series series = results[0] as Series;
-      final Recommend recommend = results[1] as Recommend;
-      final Album album = results[2] as Album;
-      return SeriesDetailData(
-        drama: dramaFromSeries(series),
-        seasons: <SeasonInfo>[
-          for (final Season season in album.seasons)
-            SeasonInfo(
-              seriesId: season.seriesId,
-              title: season.title,
-              index: season.index,
-              episodeCount: season.episodeCount,
-            ),
-        ],
-        recommend: <Drama>[
-          for (final SeriesSummary item in recommend.items)
-            dramaFromSummary(item),
-        ],
-        isMultiSeason: series.isMultiSeason,
-        relatedAlbumId: series.relatedAlbumId,
-        payType: series.payType.value,
+            .catchError((Object _) => Album());
+        final Future<List<Drama>> sameKindFuture = kind == '短剧'
+            ? Future<List<Drama>>.value(const <Drama>[])
+            : _discoverSameKind(client, kind);
+        final Recommend recommend = await recommendFuture;
+        final Album album = await albumFuture;
+        final List<Drama> sameKind = await sameKindFuture;
+        final _Recommendation recommendation = _recommendationFor(
+          series: series,
+          recommend: recommend,
+          kind: kind,
+          sameKind: sameKind,
+        );
+        return SeriesDetailData(
+          drama: dramaFromSeries(series, kind: kind),
+          seasons: <SeasonInfo>[
+            for (final Season season in album.seasons)
+              SeasonInfo(
+                seriesId: season.seriesId,
+                title: season.title,
+                index: season.index,
+                episodeCount: season.episodeCount,
+              ),
+          ],
+          recommend: recommendation.items,
+          recommendTitle: recommendation.title,
+          isMultiSeason: series.isMultiSeason,
+          relatedAlbumId: series.relatedAlbumId,
+          payType: series.payType.value,
+        );
+      });
+      _rememberDetail(seriesId, data);
+      return data;
+    } catch (_) {
+      if (cached != null) {
+        return cached.data;
+      }
+      rethrow;
+    }
+  }
+
+  void _rememberDetail(String seriesId, SeriesDetailData data) {
+    _detailCache[seriesId] = _CachedDetail(data);
+    if (_detailCache.length <= _detailCacheLimit) {
+      return;
+    }
+    // 超出上限时淘汰最旧的一条，避免长会话无限增长。
+    String? oldestKey;
+    DateTime? oldestAt;
+    for (final MapEntry<String, _CachedDetail> entry in _detailCache.entries) {
+      if (oldestAt == null || entry.value.at.isBefore(oldestAt)) {
+        oldestAt = entry.value.at;
+        oldestKey = entry.key;
+      }
+    }
+    if (oldestKey != null) {
+      _detailCache.remove(oldestKey);
+    }
+  }
+
+  /// 统一处理详情页推荐：匿名接口固定回通用的「更多好剧」（与当前剧无关、
+  /// 且恒为真人剧），非真人剧时改用同类型频道内容，替换不到就隐藏推荐区。
+  static _Recommendation _recommendationFor({
+    required Series series,
+    required Recommend recommend,
+    required String kind,
+    required List<Drama> sameKind,
+  }) {
+    final String cellTitle = recommend.cellTitle.trim();
+    final List<Drama> generic = <Drama>[
+      for (final SeriesSummary item in recommend.items)
+        if (item.id.isNotEmpty && item.id != series.id)
+          dramaFromSummary(item),
+    ];
+    if (cellTitle != '更多好剧') {
+      return _Recommendation(
+        title: cellTitle.isEmpty ? '相关推荐' : cellTitle,
+        items: generic,
       );
-    });
+    }
+    if (kind == '短剧') {
+      return _Recommendation(title: cellTitle, items: generic);
+    }
+    final List<Drama> candidates = <Drama>[
+      for (final Drama item in sameKind)
+        if (item.id != series.id) item,
+    ];
+    if (candidates.isEmpty) {
+      return const _Recommendation(title: '', items: <Drama>[]);
+    }
+    return _Recommendation(title: '更多$kind', items: candidates);
+  }
+
+  /// 按类型取首页频道内容当推荐；没有对应频道的类型（电视剧）返回空。
+  /// 频道列表按类型缓存，连续打开漫剧/电影详情时推荐位不再重复等待。
+  Future<List<Drama>> _discoverSameKind(
+    OpenhongguoClient client,
+    String kind,
+  ) async {
+    final String channel = switch (kind) {
+      '漫剧' => '漫剧',
+      '电影' => '电影',
+      _ => '',
+    };
+    if (channel.isEmpty) {
+      return const <Drama>[];
+    }
+    final _CachedFeed? cached = _kindFeedCache[kind];
+    if (cached != null && cached.isFresh) {
+      return cached.items;
+    }
+    try {
+      final PagedResult<SeriesSummary> page = await client.discover(
+        DiscoverOptions(channel: channel),
+      );
+      final List<Drama> items = <Drama>[
+        for (final SeriesSummary item in page.items)
+          if (item.id.isNotEmpty && item.episodeCount > 0)
+            dramaFromSummary(item, kind: kind),
+      ];
+      _kindFeedCache[kind] = _CachedFeed(items);
+      return items;
+    } catch (_) {
+      return cached?.items ?? const <Drama>[];
+    }
   }
 
   @override
@@ -314,12 +539,43 @@ class SdkRankRepository implements RankRepository {
 }
 
 /// 播放解析：按分集缓存结果（匿名设备额度有限，绝不重复解析）。
+///
+/// 缓存只在两种情况下让路：服务端给了 [PlaybackBundle.expiresAt] 且已到期，
+/// 或调用方开流失败后显式调用 [invalidate]。未给出失效时间的地址按长期有效处理。
 class SdkPlaybackRepository implements PlaybackRepository {
-  SdkPlaybackRepository({OpenhongguoService? service})
-      : _service = service ?? OpenhongguoService.instance;
+  SdkPlaybackRepository({
+    OpenhongguoService? service,
+    DateTime Function()? now,
+    List<Duration>? resolveBackoff,
+  })  : _service = service ?? OpenhongguoService.instance,
+        _now = now ?? DateTime.now,
+        _backoff = resolveBackoff ?? _resolveBackoff;
 
   final OpenhongguoService _service;
+  final DateTime Function() _now;
+  final List<Duration> _backoff;
   final Map<String, PlaybackBundle> _cache = <String, PlaybackBundle>{};
+
+  /// 按集的作废计数：[invalidate] 某一集时该集自增，用来识别「作废之前就开始」
+  /// 的解析结果。只记被作废过的集，所以不会随解析次数增长。
+  final Map<String, int> _cacheEpoch = <String, int>{};
+
+  /// 进行中的解析：并发请求同一集只发一次。
+  final Map<String, Future<PlaybackBundle>> _inFlight =
+      <String, Future<PlaybackBundle>>{};
+
+  /// 到期前多久就视为过期：开流本身要花时间，卡着到期点取出的地址拉不动。
+  static const Duration _expiryMargin = Duration(seconds: 30);
+
+  /// 分集列表缓存：播放器每次切集 / 重试启动都会重新取一遍列表，而
+  /// listEpisodes 是分页接口（百集剧要翻多页）。列表几乎不变，按剧缓存一段时间；
+  /// 过期后刷新失败时退回旧列表，不影响切集。
+  static const Duration _episodesCacheTtl = Duration(minutes: 10);
+  static const int _episodesCacheLimit = 20;
+  final Map<String, _CachedEpisodes> _episodesCache =
+      <String, _CachedEpisodes>{};
+  final Map<String, Future<List<EpisodeInfo>>> _episodesInFlight =
+      <String, Future<List<EpisodeInfo>>>{};
 
   Future<T> _guard<T>(Future<T> Function(OpenhongguoClient client) run) async {
     try {
@@ -331,9 +587,52 @@ class SdkPlaybackRepository implements PlaybackRepository {
   }
 
   @override
-  Future<List<EpisodeInfo>> episodes(String seriesId) async {
-    try {
-      return await _guard<List<EpisodeInfo>>((OpenhongguoClient client) async {
+  Future<List<EpisodeInfo>> episodes(String seriesId) {
+    final _CachedEpisodes? cached = _episodesCache[seriesId];
+    if (cached != null && cached.isFresh) {
+      return Future<List<EpisodeInfo>>.value(cached.items);
+    }
+    return _dedupe(_episodesInFlight, seriesId, () async {
+      try {
+        final List<EpisodeInfo> items = await _fetchEpisodes(seriesId);
+        // 服务端偶发返回空列表；本地有旧列表时沿用旧列表，不把空结果交出去。
+        if (items.isEmpty && cached != null) {
+          return _keepStale(cached);
+        }
+        if (items.isNotEmpty) {
+          _rememberEpisodes(seriesId, items);
+        }
+        return items;
+      } catch (error) {
+        _logResolve('episodes fail series=$seriesId error=$error');
+        if (cached != null) {
+          return _keepStale(cached);
+        }
+        rethrow;
+      }
+    });
+  }
+
+  /// 沿用旧列表时顺延它的有效期：网络持续异常时不必每次切集都重试一遍。
+  List<EpisodeInfo> _keepStale(_CachedEpisodes cached) {
+    cached.at = _now();
+    return cached.items;
+  }
+
+  void _rememberEpisodes(String seriesId, List<EpisodeInfo> items) {
+    if (_episodesCache.length >= _episodesCacheLimit) {
+      _episodesCache.remove(
+        _episodesCache.keys.reduce(
+          (String a, String b) =>
+              _episodesCache[a]!.at.isBefore(_episodesCache[b]!.at) ? a : b,
+        ),
+      );
+    }
+    _episodesCache[seriesId] = _CachedEpisodes(items, _now);
+  }
+
+  Future<List<EpisodeInfo>> _fetchEpisodes(String seriesId) {
+    return _guard<List<EpisodeInfo>>((OpenhongguoClient client) async {
         // listEpisodes 是分页接口（默认一页 20 条），必须按 cursor 翻页
         // 拉全，否则百集剧只显示首页 20 集。上限防御：单剧最多 50 页。
         final List<EpisodeInfo> all = <EpisodeInfo>[];
@@ -352,11 +651,7 @@ class SdkPlaybackRepository implements PlaybackRepository {
           cursor = result.cursor;
         }
         return all;
-      });
-    } catch (error) {
-      _logResolve('episodes fail series=$seriesId error=$error');
-      rethrow;
-    }
+    });
   }
 
   /// 解析重试退避：服务端播放接口会间歇性返回空结果或 5xx（实测成片出现，
@@ -382,12 +677,44 @@ class SdkPlaybackRepository implements PlaybackRepository {
     }
   }
 
+  /// 已缓存的地址是否还能用。expiresAt 为 0 表示服务端没给失效时间，
+  /// 此时只能继续复用（重新解析要消耗额度），交给开流失败后的
+  /// [invalidate] 兜底。
+  bool _isUsable(PlaybackBundle bundle) {
+    if (bundle.expiresAt <= 0) {
+      return true;
+    }
+    final int nowSeconds = _now().millisecondsSinceEpoch ~/ 1000;
+    return bundle.expiresAt - nowSeconds > _expiryMargin.inSeconds;
+  }
+
   @override
-  Future<PlaybackBundle> resolve(String episodeId) async {
+  void invalidate(String episodeId) {
+    _cacheEpoch[episodeId] = (_cacheEpoch[episodeId] ?? 0) + 1;
+    _cache.remove(episodeId);
+    // 该集若还在解析中，让后续请求另起一次；旧请求完成时因计数已变不会回写缓存。
+    _inFlight.remove(episodeId);
+  }
+
+  @override
+  Future<PlaybackBundle> resolve(String episodeId) {
     final PlaybackBundle? cached = _cache[episodeId];
     if (cached != null) {
-      return cached;
+      if (_isUsable(cached)) {
+        return Future<PlaybackBundle>.value(cached);
+      }
+      _logResolve('expired episode=$episodeId expiresAt=${cached.expiresAt}');
+      _cache.remove(episodeId);
     }
+    final int epoch = _cacheEpoch[episodeId] ?? 0;
+    return _dedupe(
+      _inFlight,
+      episodeId,
+      () => _resolveWithRetry(episodeId, epoch),
+    );
+  }
+
+  Future<PlaybackBundle> _resolveWithRetry(String episodeId, int epoch) async {
     for (int attempt = 0; ; attempt++) {
       try {
         final PlaybackBundle bundle = await _guard<PlaybackBundle>(
@@ -397,7 +724,7 @@ class SdkPlaybackRepository implements PlaybackRepository {
             return bundleFrom(result);
           },
         );
-        if (bundle.streams.isNotEmpty) {
+        if (bundle.streams.isNotEmpty && epoch == (_cacheEpoch[episodeId] ?? 0)) {
           _cache[episodeId] = bundle;
         }
         // 记录各清晰度编码：bytevc2 等无法解码的编码会在播放器层
@@ -414,11 +741,10 @@ class SdkPlaybackRepository implements PlaybackRepository {
         _logResolve(
           'fail episode=$episodeId attempt=$attempt error=$error',
         );
-        if (!_retryableResolve(error.code) ||
-            attempt >= _resolveBackoff.length) {
+        if (!_retryableResolve(error.code) || attempt >= _backoff.length) {
           rethrow;
         }
-        await Future<void>.delayed(_resolveBackoff[attempt]);
+        await Future<void>.delayed(_backoff[attempt]);
       }
     }
   }
@@ -482,4 +808,75 @@ class SdkPlaybackRepository implements PlaybackRepository {
       // 日志写失败不影响播放。
     }
   }
+}
+
+/// 同一 key 并发调用共享一个进行中的请求，结束后（成功或失败）移除。
+///
+/// 注意不能用 `map[k] ??= run().whenComplete(() => map.remove(k))`：
+/// `remove` 会返回那个 Future 本身，whenComplete 把它当成要等待的结果，
+/// 形成自等待，Future 永远不完成。
+Future<T> _dedupe<T>(
+  Map<String, Future<T>> inFlight,
+  String key,
+  Future<T> Function() run,
+) {
+  final Future<T>? existing = inFlight[key];
+  if (existing != null) {
+    return existing;
+  }
+  late final Future<T> created;
+  created = run().whenComplete(() {
+    // 只摘除自己：key 上可能已被 invalidate 后的新请求替换。
+    if (identical(inFlight[key], created)) {
+      inFlight.remove(key);
+    }
+  });
+  inFlight[key] = created;
+  return created;
+}
+
+/// 带过期时间的详情缓存。
+class _CachedDetail {
+  _CachedDetail(this.data) : at = DateTime.now();
+
+  final SeriesDetailData data;
+  final DateTime at;
+
+  bool get isFresh =>
+      DateTime.now().difference(at) < SdkCatalogRepository._detailCacheTtl;
+}
+
+/// 带过期时间的分集列表缓存；时间源由仓库注入，便于测试。
+class _CachedEpisodes {
+  _CachedEpisodes(this.items, DateTime Function() now)
+      : _now = now,
+        at = now();
+
+  final List<EpisodeInfo> items;
+  final DateTime Function() _now;
+
+  /// 入缓存（或最近一次被沿用）的时间。
+  DateTime at;
+
+  bool get isFresh =>
+      _now().difference(at) < SdkPlaybackRepository._episodesCacheTtl;
+}
+
+/// 带过期时间的频道列表缓存。
+class _CachedFeed {
+  _CachedFeed(this.items) : at = DateTime.now();
+
+  final List<Drama> items;
+  final DateTime at;
+
+  bool get isFresh =>
+      DateTime.now().difference(at) < SdkCatalogRepository._detailCacheTtl;
+}
+
+/// 详情页推荐区的最终内容与标题。
+class _Recommendation {
+  const _Recommendation({required this.title, required this.items});
+
+  final String title;
+  final List<Drama> items;
 }

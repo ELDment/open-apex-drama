@@ -179,6 +179,10 @@ class MockPlaybackRepository implements PlaybackRepository {
     });
   }
 
+  /// Mock 每次都返回固定测试流，没有缓存可作废。
+  @override
+  void invalidate(String episodeId) {}
+
   @override
   @override
   Future<PlaybackBundle> resolve(String episodeId) async {
