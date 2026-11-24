@@ -581,16 +581,36 @@ void main() {
       expect(client.seasonsCalls, 1);
     });
 
-    test('返回 0 季：按失败冷却，不永久记住', () async {
+    test('返回 0 季：冷却期内不重探，冷却到期后重新探测', () async {
       client.seasonsCountForAll = 0;
       final SdkCatalogRepository r = SdkCatalogRepository(
         service: _FakeService(client),
+        now: () => now,
       );
 
       await search(r);
       await search(r);
-
       expect(client.seasonsCalls, 1);
+
+      now = now.add(const Duration(minutes: 11));
+      await search(r);
+
+      expect(client.seasonsCalls, 2);
+    });
+
+    test('探测失败：冷却到期后重新探测', () async {
+      client.seasonsFail = true;
+      final SdkCatalogRepository r = SdkCatalogRepository(
+        service: _FakeService(client),
+        now: () => now,
+      );
+
+      await search(r);
+      await search(r);
+      now = now.add(const Duration(minutes: 11));
+      await search(r);
+
+      expect(client.seasonsCalls, 2);
     });
 
     test('探测失败：冷却期内不重复探测', () async {

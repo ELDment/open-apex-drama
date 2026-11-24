@@ -15,10 +15,14 @@ import 'repositories.dart';
 
 /// 基于水果端 SDK 的实现。
 class SdkCatalogRepository implements CatalogRepository {
-  SdkCatalogRepository({OpenhongguoService? service})
-      : _service = service ?? OpenhongguoService.instance;
+  SdkCatalogRepository({OpenhongguoService? service, DateTime Function()? now})
+      : _service = service ?? OpenhongguoService.instance,
+        _now = now ?? DateTime.now;
 
   final OpenhongguoService _service;
+
+  /// 季数探测冷却用的时间源；可注入便于测试。
+  final DateTime Function() _now;
 
   Future<T> _guard<T>(Future<T> Function(OpenhongguoClient client) run) async {
     try {
@@ -167,7 +171,7 @@ class SdkCatalogRepository implements CatalogRepository {
     if (failedAt == null) {
       return true;
     }
-    if (DateTime.now().difference(failedAt) < _seasonProbeRetryAfter) {
+    if (_now().difference(failedAt) < _seasonProbeRetryAfter) {
       return false;
     }
     _seasonProbeFailedAt.remove(key);
@@ -190,12 +194,12 @@ class SdkCatalogRepository implements CatalogRepository {
       } else {
         // 查到了但一季都没有：多半是服务端抖动，按失败处理（冷却后再探），
         // 否则 0 被永久记住，卡片再也不显示季数。
-        _seasonProbeFailedAt[key] = DateTime.now();
+        _seasonProbeFailedAt[key] = _now();
       }
     } catch (_) {
       // 季接口失败不影响搜索结果本身，卡片不显示季数即可；
       // 只记下失败时间，冷却期内不重复探测。
-      _seasonProbeFailedAt[_seasonKey(seriesId, detail)] = DateTime.now();
+      _seasonProbeFailedAt[_seasonKey(seriesId, detail)] = _now();
     }
   }
 
