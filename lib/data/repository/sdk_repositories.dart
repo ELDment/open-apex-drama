@@ -297,8 +297,10 @@ class SdkCatalogRepository implements CatalogRepository {
     if (cached != null && cached.isFresh) {
       return Future<SeriesDetailData>.value(cached.data);
     }
-    return _detailInFlight[seriesId] ??= _fetchDetail(seriesId).whenComplete(
-      () => _detailInFlight.remove(seriesId),
+    return _detailInFlight[seriesId] ??= _dedupe(
+      _detailInFlight,
+      seriesId,
+      () => _fetchDetail(seriesId),
     );
   }
 
@@ -637,9 +639,7 @@ class SdkPlaybackRepository implements PlaybackRepository {
       _logResolve('expired episode=$episodeId expiresAt=${cached.expiresAt}');
       _cache.remove(episodeId);
     }
-    return _inFlight[episodeId] ??= _resolveWithRetry(episodeId).whenComplete(
-      () => _inFlight.remove(episodeId),
-    );
+    return _dedupe(_inFlight, episodeId, () => _resolveWithRetry(episodeId));
   }
 
   Future<PlaybackBundle> _resolveWithRetry(String episodeId) async {
@@ -729,6 +729,27 @@ class SdkPlaybackRepository implements PlaybackRepository {
       // 日志写失败不影响播放。
     }
   }
+}
+
+/// 同一 key 并发调用共享一个进行中的请求，结束后（成功或失败）移除。
+///
+/// 注意不能用 `map[k] ??= run().whenComplete(() => map.remove(k))`：
+/// `remove` 会返回那个 Future 本身，whenComplete 把它当成要等待的结果，
+/// 形成自等待，Future 永远不完成。
+Future<T> _dedupe<T>(
+  Map<String, Future<T>> inFlight,
+  String key,
+  Future<T> Function() run,
+) {
+  final Future<T>? existing = inFlight[key];
+  if (existing != null) {
+    return existing;
+  }
+  final Future<T> created = run().whenComplete(() {
+    inFlight.remove(key);
+  });
+  inFlight[key] = created;
+  return created;
 }
 
 /// 带过期时间的详情缓存。

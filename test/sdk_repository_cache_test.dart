@@ -212,6 +212,7 @@ void main() {
 
     test('invalidate 只作废指定的那一集', () async {
       client.resolveSteps.add(() => _ok('a'));
+      client.resolveSteps.add(() => _ok('a'));
       client.resolveSteps.add(() => _ok('b'));
       final SdkPlaybackRepository r = repo();
       await r.resolve('ep1');
