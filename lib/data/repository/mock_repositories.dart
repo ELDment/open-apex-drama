@@ -184,7 +184,6 @@ class MockPlaybackRepository implements PlaybackRepository {
   void invalidate(String episodeId) {}
 
   @override
-  @override
   Future<PlaybackBundle> resolve(String episodeId) async {
     await Future<void>.delayed(const Duration(milliseconds: 400));
     return PlaybackBundle(
@@ -204,8 +203,6 @@ class MockPlaybackRepository implements PlaybackRepository {
     );
   }
 
-  @override
-  void invalidate(String episodeId) {}
   @override
   Future<List<DanmakuCue>> danmaku(String seriesId, String episodeId) async {
     return const <DanmakuCue>[];
