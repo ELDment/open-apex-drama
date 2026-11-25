@@ -270,6 +270,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       _isFullscreen ||
       MediaQuery.orientationOf(context) == Orientation.landscape;
 
+  /// 全屏按钮图标/文案所依据的全屏态。
+  ///
+  /// 不能直接用 [_isWideLayout]：Windows 窗口本身就是横的宽窗，它恒为 true，
+  /// 于是进/退全屏图标永远不变（桌面用户实际遇到的问题）。Windows 全屏是
+  /// 窗口级全屏，只认 [_isFullscreen]；其它平台的全屏靠强制横屏实现，
+  /// 物理旋转后同样是全屏态，沿用 [_isWideLayout]。
+  bool get _fullscreenIndicator =>
+      _isWindowsPlatform ? _isFullscreen : _isWideLayout;
+
   /// 是否走移动端竖屏播放布局。
   ///
   /// 用 [defaultTargetPlatform] 而不是 [Platform.isWindows]：运行时桌面仍然
@@ -1992,7 +2001,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                                       showMobileActions: compactControls,
                                       speedLabel: _speedLabel,
                                       onSpeed: _showSpeedSheet,
-                                      isFullscreen: isWide,
+                                      isFullscreen: _fullscreenIndicator,
                                       onToggleFullscreen: _toggleFullscreen,
                                     ),
                                   ),
@@ -2028,7 +2037,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                                               onSpeed: _showSpeedSheet,
                                               onShowQuality: _showQualitySheet,
                                               onOpenEpisodes: _showEpisodes,
-                                              isFullscreen: isWide,
+                                              isFullscreen:
+                                                  _fullscreenIndicator,
                                               onToggleFullscreen:
                                                   _toggleFullscreen,
                                               // 手机端才收进右侧操作栏；
@@ -2074,12 +2084,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                                                 // Player 未就绪时底部不再兜底。
                                                 if (!compactControls)
                                                   _GlassSquareButton(
-                                                    icon: isWide
+                                                    icon: _fullscreenIndicator
                                                         ? Icons
                                                               .fullscreen_exit_rounded
                                                         : Icons
                                                               .fullscreen_rounded,
-                                                    tooltip: isWide
+                                                    tooltip:
+                                                        _fullscreenIndicator
                                                         ? '退出全屏'
                                                         : '全屏',
                                                     onPressed:
