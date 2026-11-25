@@ -463,8 +463,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     if (_isFullscreen) {
       _isFullscreen = false;
       if (Platform.isWindows) {
-        // 窗口全屏态退出时恢复窗口样式；dispose 不能 await，fire-and-forget。
-        windowManager.setFullScreen(false);
+        // 窗口全屏态退出时恢复窗口与标题栏；dispose 不能 await，fire-and-forget。
+        unawaited(_restoreWindowsWindow());
       } else {
         SystemChrome.setPreferredOrientations(<DeviceOrientation>[
           DeviceOrientation.portraitUp,
@@ -999,19 +999,66 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _boot();
   }
 
-  /// 全屏切换：桌面（Windows）用窗口全屏（setFullScreen，不转方向、
-  /// 不动系统栏）；移动端维持原「强制横屏 + 沉浸式系统栏」。
-  Future<void> _toggleFullscreen() async {
-    setState(() => _isFullscreen = !_isFullscreen);
-    if (Platform.isWindows) {
+  /// Windows 全屏形态切换：先藏系统标题栏再进窗口全屏；退出时先出全屏
+  /// 再恢复标题栏（finally 保证必恢复，避免残留在无标题栏的中间态）。
+  Future<void> _applyWindowsFullscreen(bool fullscreen) async {
+    if (fullscreen) {
+      await windowManager.setTitleBarStyle(
+        TitleBarStyle.hidden,
+        windowButtonVisibility: false,
+      );
       try {
-        await windowManager.setFullScreen(_isFullscreen);
-      } catch (error) {
-        debugPrint('windowManager fullscreen error: $error');
+        await windowManager.setFullScreen(true);
+      } catch (_) {
+        // 进全屏失败必须把标题栏放回来，否则窗口无标题栏又不是全屏。
+        await windowManager.setTitleBarStyle(TitleBarStyle.normal);
+        rethrow;
       }
       return;
     }
-    if (_isFullscreen) {
+    try {
+      await windowManager.setFullScreen(false);
+    } finally {
+      await windowManager.setTitleBarStyle(TitleBarStyle.normal);
+    }
+  }
+
+  /// dispose 路径的恢复：吞异常只打日志，不阻塞销毁。
+  Future<void> _restoreWindowsWindow() async {
+    try {
+      await _applyWindowsFullscreen(false);
+    } catch (error) {
+      debugPrint('windowManager restore error: $error');
+    }
+  }
+
+  /// 全屏切换：桌面（Windows）用无标题栏的窗口全屏（不转方向、
+  /// 不动系统栏）；移动端维持原「强制横屏 + 沉浸式系统栏」。
+  Future<void> _toggleFullscreen() async {
+    final bool fullscreen = !_isFullscreen;
+    setState(() => _isFullscreen = fullscreen);
+    if (Platform.isWindows) {
+      try {
+        await _applyWindowsFullscreen(fullscreen);
+      } catch (error) {
+        debugPrint('windowManager fullscreen error: $error');
+        // 切换失败把 UI 状态回滚，不显示假全屏态。
+        if (mounted && _isFullscreen == fullscreen) {
+          setState(() => _isFullscreen = !fullscreen);
+        }
+        return;
+      }
+      if (fullscreen) {
+        _scheduleControlsHide();
+      } else {
+        _controlsHideTimer?.cancel();
+        if (mounted && !_controlsVisible) {
+          setState(() => _controlsVisible = true);
+        }
+      }
+      return;
+    }
+    if (fullscreen) {
       SystemChrome.setPreferredOrientations(<DeviceOrientation>[
         DeviceOrientation.landscapeLeft,
         DeviceOrientation.landscapeRight,
