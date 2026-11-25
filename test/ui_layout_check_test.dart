@@ -744,6 +744,49 @@ void main() {
     }
   });
 
+  testWidgets('Windows mini player restores on Escape, button and disposal', (
+    WidgetTester tester,
+  ) async {
+    const MethodChannel channel = MethodChannel('apexduanju/mini_player');
+    final List<String> calls = <String>[];
+    final TestDefaultBinaryMessenger messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (MethodCall call) async {
+      calls.add(call.method);
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    await pumpScreen(
+      tester,
+      PlayerScreen(drama: mockHero),
+      size: const Size(800, 600),
+    );
+    final State<StatefulWidget> player = tester.state(find.byType(PlayerScreen));
+
+    Future<void> enter() async {
+      await tester.tap(find.byTooltip('打开小窗'));
+      await tester.pump();
+      tester.view.physicalSize = const Size(384, 216);
+      await tester.pump();
+      expect(find.byTooltip('选集'), findsNothing);
+      expect(find.byTooltip('返回播放窗口'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      tester.view.physicalSize = const Size(800, 600);
+    }
+
+    await enter();
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    await enter();
+    await tester.tap(find.byTooltip('返回播放窗口'));
+    await tester.pump();
+    expect(tester.state(find.byType(PlayerScreen)), same(player));
+    await enter();
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(calls, <String>['enter', 'exit', 'enter', 'exit', 'enter', 'exit']);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
+
   testWidgets('category filter chip tap refreshes the result grid', (
     WidgetTester tester,
   ) async {

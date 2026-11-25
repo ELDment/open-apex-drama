@@ -1,5 +1,9 @@
 #include "flutter_window.h"
 
+#include <flutter/method_channel.h>
+#include <flutter/standard_method_codec.h>
+#include <flutter_windows.h>
+
 #include <optional>
 
 #include "flutter/generated_plugin_registrant.h"
@@ -25,6 +29,26 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  flutter::MethodChannel<> mini_player(
+      flutter_controller_->engine()->messenger(), "apexduanju/mini_player",
+      &flutter::StandardMethodCodec::GetInstance());
+  mini_player.SetMethodCallHandler([this](const auto& call, auto result) {
+    bool ok;
+    if (call.method_name() == "enter" && call.arguments() &&
+        std::holds_alternative<bool>(*call.arguments())) {
+      ok = EnterMiniPlayer(std::get<bool>(*call.arguments()));
+    } else if (call.method_name() == "exit") {
+      ok = ExitMiniPlayer();
+    } else {
+      result->NotImplemented();
+      return;
+    }
+    if (ok) {
+      result->Success();
+    } else {
+      result->Error("window", "Could not change mini player mode");
+    }
+  });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -36,6 +60,49 @@ bool FlutterWindow::OnCreate() {
   // window is shown. It is a no-op if the first frame hasn't completed yet.
   flutter_controller_->ForceRedraw();
 
+  return true;
+}
+
+bool FlutterWindow::EnterMiniPlayer(bool portrait) {
+  if (saved_placement_.length != 0) return true;
+  HWND hwnd = GetHandle();
+  HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+  MONITORINFO info{};
+  info.cbSize = sizeof(info);
+  WINDOWPLACEMENT placement{};
+  placement.length = sizeof(placement);
+  if (!GetMonitorInfo(monitor, &info) || !GetWindowPlacement(hwnd, &placement)) {
+    return false;
+  }
+  saved_placement_ = placement;
+  saved_style_ = GetWindowLongPtr(hwnd, GWL_STYLE);
+  was_topmost_ = (GetWindowLongPtr(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+  if (IsZoomed(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+  const LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+  SetWindowLongPtr(hwnd, GWL_STYLE, (style & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+  const int dpi = static_cast<int>(FlutterDesktopGetDpiForMonitor(monitor));
+  const int width = MulDiv(portrait ? 216 : 384, dpi, 96);
+  const int height = MulDiv(portrait ? 384 : 216, dpi, 96);
+  const int margin = MulDiv(16, dpi, 96);
+  if (SetWindowPos(hwnd, HWND_TOPMOST, info.rcWork.right - width - margin,
+                   info.rcWork.bottom - height - margin, width, height,
+                   SWP_FRAMECHANGED | SWP_NOACTIVATE)) {
+    return true;
+  }
+  ExitMiniPlayer();
+  return false;
+}
+
+bool FlutterWindow::ExitMiniPlayer() {
+  if (saved_placement_.length == 0) return true;
+  HWND hwnd = GetHandle();
+  SetWindowLongPtr(hwnd, GWL_STYLE, saved_style_ & ~WS_MAXIMIZE);
+  if (!SetWindowPlacement(hwnd, &saved_placement_) ||
+      !SetWindowPos(hwnd, was_topmost_ ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED)) {
+    return false;
+  }
+  saved_placement_ = {};
   return true;
 }
 

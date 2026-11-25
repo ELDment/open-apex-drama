@@ -23,6 +23,13 @@ class FlutterWindow : public Win32Window {
                          LPARAM const lparam) noexcept override;
 
  private:
+  bool EnterMiniPlayer(bool portrait);
+  bool ExitMiniPlayer();
+
+  WINDOWPLACEMENT saved_placement_{};
+  LONG_PTR saved_style_ = 0;
+  bool was_topmost_ = false;
+
   // The project to run.
   flutter::DartProject project_;
 
