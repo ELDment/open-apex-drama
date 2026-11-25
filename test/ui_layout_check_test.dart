@@ -763,10 +763,10 @@ void main() {
     );
     final State<StatefulWidget> player = tester.state(find.byType(PlayerScreen));
 
-    Future<void> enter() async {
+    Future<void> enter(Size size) async {
       await tester.tap(find.byTooltip('打开小窗'));
       await tester.pump();
-      tester.view.physicalSize = const Size(384, 216);
+      tester.view.physicalSize = size;
       await tester.pump();
       expect(find.byTooltip('选集'), findsNothing);
       expect(find.byTooltip('返回播放窗口'), findsOneWidget);
@@ -774,17 +774,19 @@ void main() {
       tester.view.physicalSize = const Size(800, 600);
     }
 
-    await enter();
+    await enter(const Size(208, 156));
+    await tester.dragFrom(const Offset(14, 65), const Offset(40, 10));
+    expect(calls, <String>['enter', 'drag']);
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pump();
-    await enter();
+    await enter(const Size(216, 384));
     await tester.tap(find.byTooltip('返回播放窗口'));
     await tester.pump();
     expect(tester.state(find.byType(PlayerScreen)), same(player));
-    await enter();
+    await enter(const Size(384, 216));
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
-    expect(calls, <String>['enter', 'exit', 'enter', 'exit', 'enter', 'exit']);
+    expect(calls, <String>['enter', 'drag', 'exit', 'enter', 'exit', 'enter', 'exit']);
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   testWidgets('category filter chip tap refreshes the result grid', (

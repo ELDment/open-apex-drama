@@ -29,6 +29,8 @@ class FlutterWindow : public Win32Window {
   WINDOWPLACEMENT saved_placement_{};
   LONG_PTR saved_style_ = 0;
   bool was_topmost_ = false;
+  bool mini_portrait_ = false;
+  SIZE mini_sizes_[2] = {{384, 216}, {216, 384}};
 
   // The project to run.
   flutter::DartProject project_;

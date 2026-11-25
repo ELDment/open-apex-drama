@@ -170,6 +170,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   static const MethodChannel _miniPlayerChannel =
       MethodChannel('apexduanju/mini_player');
   bool _miniPlayer = false;
+  double? _miniSeekPreview;
   bool _windowBusy = false;
   double _volume = 1.0;
   Offset? _pointerStart;
@@ -305,7 +306,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         : _controlsAutoHideDelay;
     _controlsHideTimer = Timer(delay, () {
       // 暂停中不自动隐藏；正在拖动进度也不隐藏。
-      if (mounted && _playing && !_scrubbing && _controlsVisible) {
+      if (mounted && _playing && !_scrubbing &&
+          _miniSeekPreview == null && _controlsVisible) {
         setState(() => _controlsVisible = false);
       }
     });
@@ -1024,7 +1026,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         entering ? 'enter' : 'exit',
         entering ? _videoHeight > _videoWidth : null,
       );
-      if (!entering && mounted) setState(() => _miniPlayer = false);
+      if (!entering && mounted) {
+        setState(() {
+          _miniPlayer = false;
+          _miniSeekPreview = null;
+        });
+      }
     } catch (error) {
       if (entering && mounted) setState(() => _miniPlayer = false);
       debugPrint('mini player error: $error');
@@ -1691,6 +1698,142 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     setState(() {});
   }
 
+  Widget _buildMiniPlayerControls() {
+    final Player? player = _player;
+    const TextStyle timeStyle = TextStyle(
+      color: Colors.white,
+      fontSize: 11,
+      fontFeatures: <FontFeature>[FontFeature.tabularFigures()],
+    );
+    return Stack(
+      children: <Widget>[
+        const Positioned.fill(
+          child: IgnorePointer(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: <Color>[
+                    Colors.black38,
+                    Colors.transparent,
+                    Colors.black87,
+                  ],
+                  stops: <double>[0, 0.5, 1],
+                ),
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          top: 2,
+          right: 4,
+          child: _GlassSquareButton(
+            icon: Icons.open_in_full_rounded,
+            tooltip: '返回播放窗口',
+            onPressed: _toggleMiniPlayer,
+          ),
+        ),
+        if (player != null) ...<Widget>[
+          Center(
+            child: DecoratedBox(
+              decoration: const ShapeDecoration(
+                color: Colors.black54,
+                shape: StadiumBorder(),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  _GlassSquareButton(
+                    icon: Icons.replay_10_rounded,
+                    tooltip: '后退 10 秒',
+                    onPressed: () => _seekBy(const Duration(seconds: -10)),
+                  ),
+                  ValueListenableBuilder<bool>(
+                    valueListenable: _danmakuPlaying,
+                    builder: (context, playing, _) => IconButton(
+                      tooltip: playing ? '暂停' : '播放',
+                      icon: Icon(
+                        playing
+                            ? Icons.pause_rounded
+                            : Icons.play_arrow_rounded,
+                      ),
+                      iconSize: 30,
+                      color: Colors.white,
+                      onPressed: _togglePlay,
+                    ),
+                  ),
+                  _GlassSquareButton(
+                    icon: Icons.forward_10_rounded,
+                    tooltip: '前进 10 秒',
+                    onPressed: () => _seekBy(const Duration(seconds: 10)),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Positioned(
+            left: 10,
+            right: 10,
+            bottom: 2,
+            child: StreamBuilder<Duration>(
+              stream: player.stream.duration,
+              initialData: player.state.duration,
+              builder: (context, snapshot) {
+                final Duration total = snapshot.data ?? Duration.zero;
+                return ValueListenableBuilder<Duration>(
+                  valueListenable: _danmakuClock,
+                  builder: (context, position, _) {
+                    final double fraction =
+                        _miniSeekPreview ??
+                        (total.inMilliseconds > 0
+                            ? (position.inMilliseconds / total.inMilliseconds)
+                                  .clamp(0.0, 1.0)
+                            : 0.0);
+                    return Row(
+                      children: <Widget>[
+                        Text(
+                          _formatDuration(total * fraction),
+                          style: timeStyle,
+                        ),
+                        Expanded(
+                          child: Slider(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 14,
+                            ),
+                            activeColor: AppTokens.immersiveAccent,
+                            inactiveColor: Colors.white38,
+                            thumbColor: Colors.white,
+                            value: fraction,
+                            semanticFormatterCallback: (value) =>
+                                _formatDuration(total * value),
+                            onChangeStart: (value) =>
+                                setState(() => _miniSeekPreview = value),
+                            onChanged: total > Duration.zero
+                                ? (value) =>
+                                      setState(() => _miniSeekPreview = value)
+                                : null,
+                            onChangeEnd: (value) {
+                              _seekToFraction(value);
+                              setState(() => _miniSeekPreview = null);
+                              _scheduleControlsHide();
+                            },
+                          ),
+                        ),
+                        Text(_formatDuration(total), style: timeStyle),
+                      ],
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
   /// 收藏 / 分享操作栏（竖屏与横屏全屏共用一份）。
   /// 收藏与详情页 / 追剧页共用同一 store，状态天然联动。
   /// 手机端将高频的倍速 / 选集移到右侧，并隐藏分享；
@@ -1798,16 +1941,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
             onPressed: _toggleMiniPlayer,
           )
         : null;
-    final Widget? miniPlayerControls = _miniPlayer
-        ? Align(
-            alignment: Alignment.topRight,
-            child: _GlassSquareButton(
-              icon: Icons.open_in_full_rounded,
-              tooltip: '返回播放窗口',
-              onPressed: _toggleMiniPlayer,
-            ),
-          )
-        : null;
+    final Widget? miniPlayerControls = _miniPlayer ? _buildMiniPlayerControls() : null;
 
     return CallbackShortcuts(
       bindings: _shortcutBindings,
@@ -1862,9 +1996,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                     ? (_) => _stopHoldSpeed()
                     : null,
                 onLongPressCancel: _isMobilePlatform ? _stopHoldSpeed : null,
-                onPanStart: _miniPlayer
-                    ? (_) => windowManager.startDragging()
-                    : null,
                 onHorizontalDragStart: _miniPlayer
                     ? null
                     : (_) => _startScrub(),
@@ -2014,6 +2145,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                               drama: _activeDrama,
                               variant: PosterVariant.full,
                             ),
+                          ),
+                        ),
+                      if (_miniPlayer)
+                        Positioned.fill(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onPanStart: (_) => _miniPlayerChannel.invokeMethod<void>('drag'),
                           ),
                         ),
                       if (_loading) const _CenteredStatus(loading: true),
