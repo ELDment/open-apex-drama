@@ -385,8 +385,8 @@ packages:
     dependency: "direct main"
     description:
       path: "bindings/flutter"
-      ref: "8223867a"
-      resolved-ref: "8223867afa3f6d20f332c6ae6ebb40fba4f81666"
+      ref: df01210
+      resolved-ref: df01210aed72d8a803e0eef541bfc8cb131de716
       url: "https://github.com/Sxuan-Coder/openhongguo.git"
     source: git
     version: "0.4.1"
