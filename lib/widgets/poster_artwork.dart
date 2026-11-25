@@ -38,23 +38,34 @@ class PosterArtwork extends StatelessWidget {
           wordmarkScale: variant == PosterVariant.full ? 0.50 : 0.64,
         ),
         if (hasCover)
-          Image.network(
-            drama.coverUrl,
-            fit: BoxFit.cover,
-            alignment: Alignment.topCenter,
-            // CDN 签名 URL 可能随时失效；失败时静默回落渐变占位。
-            errorBuilder: (_, _, _) => const SizedBox.shrink(),
-            // 加载完成前也露出渐变底，避免闪白。
-            frameBuilder: (
-              BuildContext context,
-              Widget child,
-              int? frame,
-              bool wasLoaded,
-            ) {
-              if (wasLoaded || frame != null) {
-                return child;
-              }
-              return const SizedBox.shrink();
+          LayoutBuilder(
+            builder: (BuildContext context, BoxConstraints constraints) {
+              // 按实际布局宽度解码：源图常见 750~1080 宽，而桌面卡片只有
+              // 一两百逻辑像素，全尺寸解码白白占内存与 UI 线程时间。
+              final double width = constraints.maxWidth;
+              final int? cacheWidth = width.isFinite && width > 0
+                  ? (width * MediaQuery.devicePixelRatioOf(context)).round()
+                  : null;
+              return Image.network(
+                drama.coverUrl,
+                cacheWidth: cacheWidth,
+                fit: BoxFit.cover,
+                alignment: Alignment.topCenter,
+                // CDN 签名 URL 可能随时失效；失败时静默回落渐变占位。
+                errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                // 加载完成前也露出渐变底，避免闪白。
+                frameBuilder: (
+                  BuildContext context,
+                  Widget child,
+                  int? frame,
+                  bool wasLoaded,
+                ) {
+                  if (wasLoaded || frame != null) {
+                    return child;
+                  }
+                  return const SizedBox.shrink();
+                },
+              );
             },
           ),
         // 真实封面压一层暗色遮罩，保证角标/标题可读（与渐变占位的 scrim 一致）。
