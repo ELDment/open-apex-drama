@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -629,6 +630,119 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('category screen appends the next filter page', (
+    WidgetTester tester,
+  ) async {
+    await pumpScreen(
+      tester,
+      const Scaffold(body: CategoryScreen()),
+      size: const Size(390, 844),
+    );
+
+    // mock 12 部按 6 条/页分页：首页应有「加载更多」与「已显示 6 部」。
+    expect(find.text('已显示 6 部'), findsOneWidget);
+    final Finder loadMore = find.text('加载更多');
+    expect(loadMore, findsOneWidget);
+
+    await tester.tap(loadMore);
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+
+    // 第二页追加后拿全 12 部，「加载更多」消失、计数复位为「共 N 部」。
+    // SliverGrid 懒加载只构建可见卡片，这里以计数与按钮消失为准。
+    expect(loadMore, findsNothing);
+    expect(find.text('共 12 部'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('category filter switch discards stale appended pages', (
+    WidgetTester tester,
+  ) async {
+    await pumpScreen(
+      tester,
+      const Scaffold(body: CategoryScreen()),
+      size: const Size(390, 844),
+    );
+
+    // 「全部」先加载第二页（共 12 部）。
+    await tester.tap(find.text('加载更多'));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+    expect(find.text('共 12 部'), findsOneWidget);
+
+    // 切到「古装」筛选：追加页作废，只展示该题材首页（3 部）。
+    await tester.tap(
+      find.descendant(of: find.byType(SoftChip), matching: find.text('古装')),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+
+    expect(find.text('古装 · 精选短剧'), findsOneWidget);
+    expect(find.text('共 3 部'), findsOneWidget);
+    expect(find.byType(DramaCard), findsNWidgets(3));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('player Windows fullscreen hides and restores native title bar', (
+    WidgetTester tester,
+  ) async {
+    const MethodChannel channel = MethodChannel('window_manager');
+    final List<MethodCall> calls = <MethodCall>[];
+    final TestDefaultBinaryMessenger messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (MethodCall call) async {
+      calls.add(call);
+      return true;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      await pumpScreen(
+        tester,
+        PlayerScreen(drama: mockHero),
+        size: const Size(800, 1000),
+      );
+
+      await tester.tap(find.byTooltip('全屏').first);
+      await tester.pump();
+      // 进全屏：先藏标题栏再设全屏。
+      expect(
+        calls.map((MethodCall call) => call.method),
+        containsAllInOrder(<String>['setTitleBarStyle', 'setFullScreen']),
+      );
+      final Map<Object?, Object?> enterTitleArgs =
+          calls
+                  .firstWhere(
+                    (MethodCall call) => call.method == 'setTitleBarStyle',
+                  )
+                  .arguments
+              as Map<Object?, Object?>;
+      expect(enterTitleArgs['titleBarStyle'], 'hidden');
+      expect(enterTitleArgs['windowButtonVisibility'], isFalse);
+
+      calls.clear();
+      await tester.tap(find.byTooltip('退出全屏').first);
+      await tester.pump();
+      // 退全屏：先出全屏再恢复标题栏。
+      expect(
+        calls.map((MethodCall call) => call.method),
+        containsAllInOrder(<String>['setFullScreen', 'setTitleBarStyle']),
+      );
+      final Map<Object?, Object?> leaveTitleArgs =
+          calls
+                  .lastWhere(
+                    (MethodCall call) => call.method == 'setTitleBarStyle',
+                  )
+                  .arguments
+              as Map<Object?, Object?>;
+      expect(leaveTitleArgs['titleBarStyle'], 'normal');
+      expect(tester.takeException(), isNull);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 
   testWidgets('category filter chip tap refreshes the result grid', (
     WidgetTester tester,
