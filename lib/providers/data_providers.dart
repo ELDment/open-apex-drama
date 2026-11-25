@@ -88,23 +88,30 @@ final filterPanelProvider = FutureProvider<List<FilterGroupData>>((Ref ref) {
   return ref.watch(catalogRepositoryProvider).filterPanel();
 });
 
-/// 分类筛选结果（ selections 的 key 按字典序拼接作为缓存键 ）。
-final filterResultProvider = FutureProvider.family<List<Drama>, String>(
-  (Ref ref, String selectionsKey) {
-    final Map<String, List<String>> selections = <String, List<String>>{};
-    for (final String pair in selectionsKey.split(';')) {
-      if (pair.isEmpty) {
-        continue;
-      }
-      final int split = pair.indexOf('=');
-      if (split <= 0) {
-        continue;
-      }
-      selections[pair.substring(0, split)] = pair.substring(split + 1).split(',');
+/// 把筛选缓存键还原成 selections：`key=v1,v2;key2=v3`（键与值均按字典序
+/// 排列，由 CategoryScreen._selectionsKey 生成），加载更多时复用同一解析。
+Map<String, List<String>> filterSelectionsFromKey(String selectionsKey) {
+  final Map<String, List<String>> selections = <String, List<String>>{};
+  for (final String pair in selectionsKey.split(';')) {
+    if (pair.isEmpty) {
+      continue;
     }
+    final int split = pair.indexOf('=');
+    if (split <= 0) {
+      continue;
+    }
+    selections[pair.substring(0, split)] = pair.substring(split + 1).split(',');
+  }
+  return selections;
+}
+
+/// 分类筛选结果（ selections 的 key 按字典序拼接作为缓存键 ）：只含第一页，
+/// 下一页由 CategoryScreen 持 cursor 追加加载。
+final filterResultProvider = FutureProvider.family<DramaPage, String>(
+  (Ref ref, String selectionsKey) {
     return ref
         .watch(catalogRepositoryProvider)
-        .filter(selections: selections);
+        .filter(selections: filterSelectionsFromKey(selectionsKey));
   },
 );
 
