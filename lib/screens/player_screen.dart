@@ -462,7 +462,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     // 桌面残留全屏窗口、移动端残留横屏）。
     if (_isFullscreen) {
       _isFullscreen = false;
-      if (Platform.isWindows) {
+      if (_isWindowsPlatform) {
         // 窗口全屏态退出时恢复窗口与标题栏；dispose 不能 await，fire-and-forget。
         unawaited(_restoreWindowsWindow());
       } else {
@@ -999,6 +999,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _boot();
   }
 
+  /// 是否走 Windows 窗口全屏形态：用 defaultTargetPlatform 而非
+  /// Platform.isWindows，widget 测试才能以 debugDefaultTargetPlatformOverride
+  /// 模拟 Windows；真实 Windows 桌面上二者一致。
+  bool get _isWindowsPlatform => defaultTargetPlatform == TargetPlatform.windows;
+
   /// Windows 全屏形态切换：先藏系统标题栏再进窗口全屏；退出时先出全屏
   /// 再恢复标题栏（finally 保证必恢复，避免残留在无标题栏的中间态）。
   Future<void> _applyWindowsFullscreen(bool fullscreen) async {
@@ -1037,7 +1042,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   Future<void> _toggleFullscreen() async {
     final bool fullscreen = !_isFullscreen;
     setState(() => _isFullscreen = fullscreen);
-    if (Platform.isWindows) {
+    if (_isWindowsPlatform) {
       try {
         await _applyWindowsFullscreen(fullscreen);
       } catch (error) {
