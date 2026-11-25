@@ -265,6 +265,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   Timer? _controlsHideTimer;
   bool _playing = false;
 
+  /// 控制层锁定（防误触）：锁定后所有画面手势与控制层全部禁用，
+  /// 仅锁图标可点解锁。仅移动端横屏提供入口（竖屏与桌面无此态）。
+  bool _controlsLocked = false;
+
   /// 当前是否横屏全屏布局（全屏请求或物理旋转任一成立）。
   bool get _isWideLayout =>
       _isFullscreen ||
@@ -282,7 +286,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           defaultTargetPlatform == TargetPlatform.iOS) &&
       MediaQuery.sizeOf(context).shortestSide < 600;
 
+  /// 锁定入口是否可用：仅移动端横屏（全屏请求或物理旋转任一成立）。
+  /// 竖屏信息流没有锁定诉求，桌面无触摸误触问题，均不提供。
+  bool get _lockAvailable =>
+      _isMobilePlatform &&
+      (_isFullscreen ||
+          MediaQuery.orientationOf(context) == Orientation.landscape);
+
   void _onMouseHover(PointerEvent event) {
+    if (_controlsLocked) {
+      return;
+    }
     if (!_controlsVisible) {
       setState(() => _controlsVisible = true);
     }
@@ -313,15 +327,43 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _togglePlay();
   }
 
-  /// 移动端单击画面：控制层隐藏时先唤出（2 秒后再次自动隐藏），
-  /// 已显示时切播放/暂停，与主流短剧一致。
+  /// 移动端单击画面：
+  /// - 竖屏（信息流惯例）：控制层隐藏时先唤出（2 秒后自动隐藏），
+  ///   已显示时切播放/暂停；
+  /// - 横屏全屏（长视频惯例）：单击只负责唤出/收起控制栏，
+  ///   播放/暂停交给双击（见 onDoubleTap），降低误触概率。
+  /// 锁定态下画面单击一律忽略。
   void _onMobileTap() {
+    if (_controlsLocked) {
+      return;
+    }
+    if (_isWideLayout) {
+      setState(() => _controlsVisible = !_controlsVisible);
+      if (_controlsVisible) {
+        _scheduleControlsHide();
+      } else {
+        _controlsHideTimer?.cancel();
+      }
+      return;
+    }
     if (!_controlsVisible) {
       setState(() => _controlsVisible = true);
       _scheduleControlsHide();
       return;
     }
     _togglePlay();
+  }
+
+  /// 切换控制层锁定。锁定时立即收起控制层并取消隐藏计时，
+  /// 锁图标以常驻角标形式保留（见 [_buildLockButton]）。
+  void _toggleLock() {
+    setState(() {
+      _controlsLocked = !_controlsLocked;
+      if (_controlsLocked) {
+        _controlsVisible = false;
+        _controlsHideTimer?.cancel();
+      }
+    });
   }
 
   /// 播放状态流回调：维护 [_playing] 并驱动控制层自动隐藏。
@@ -1755,6 +1797,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     // 移动端竖屏：底部只留进度 + 全屏，传输按钮交给点按/滑动。
     final bool compactControls = !isWide && _isMobilePlatform;
     final double screenHeight = MediaQuery.sizeOf(context).height;
+    // 移动端横屏全屏：双击切播放/暂停（长视频惯例），单击只管控制栏。
+    final bool doubleTapPauses = _isMobilePlatform && isWide;
+    // 锁定态：除锁角标外全部手势禁用（识别器直接不注册，最干净）。
+    final bool locked = _controlsLocked;
 
     return CallbackShortcuts(
       bindings: _shortcutBindings,
@@ -1772,8 +1818,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
             backgroundColor: AppTokens.playerBackground,
             // 手势方案：
             // - 点击：桌面切播放状态（控制层由鼠标移动唤出，见
-            //   [_onDesktopTap]）；移动端同样切播放状态，控制层隐藏时
-            //   先唤出并在 2 秒后再隐（见 [_onMobileTap]）。
+            //   [_onDesktopTap]）；移动端竖屏切播放状态，控制层隐藏时
+            //   先唤出并在 2 秒后再隐（见 [_onMobileTap]）；移动端横屏
+            //   单击只管唤出/收起控制栏，双击切播放（长视频惯例）。
+            // - 锁定态（移动端横屏）：以上手势全部不注册，仅锁角标可点。
             // - 上下滑切集用底层 Listener 直接比对指针位移，绕开手势竞技场，
             //   避免被子级滚动/滑块等识别器抢走；
             // - 长按左/右半屏持续快退/快进，左右滑拖动进度（竞技场里按住不动
@@ -1785,12 +1833,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   : MouseCursor.defer,
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: _isMobilePlatform ? _onMobileTap : _onDesktopTap,
+                onTap: locked
+                    ? null
+                    : (_isMobilePlatform ? _onMobileTap : _onDesktopTap),
+                // 移动端横屏：双击切播放/暂停；竖屏/桌面不注册，
+                // 保持各自单击语义不变。注意 Flutter 中 onTap 与 onDoubleTap
+                // 并存时单击会延迟约 300ms 等双击判定，横屏可接受。
+                onDoubleTap: doubleTapPauses && !locked ? _togglePlay : null,
                 // 长按画面：仅移动端临时 2x，松手恢复原倍速。
                 // 桌面端不挂长按，保持原有鼠标/空格交互不变。
                 // 移动端竖屏：长按中间 1/3 弹播放设置，左右两侧仍是临时 2x。
                 // 全屏保持原行为（任意位置长按 2x）；桌面不挂长按。
-                onLongPressStart: _isMobilePlatform
+                onLongPressStart: _isMobilePlatform && !locked
                     ? (LongPressStartDetails details) {
                         final double width =
                             MediaQuery.sizeOf(context).width;
@@ -1805,17 +1859,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                         }
                       }
                     : null,
-                onLongPressEnd: _isMobilePlatform
+                onLongPressEnd: _isMobilePlatform && !locked
                     ? (_) => _stopHoldSpeed()
                     : null,
-                onLongPressCancel: _isMobilePlatform ? _stopHoldSpeed : null,
-                onHorizontalDragStart: (_) => _startScrub(),
-                onHorizontalDragUpdate: (DragUpdateDetails details) {
-                  final Size size = MediaQuery.sizeOf(context);
-                  _updateScrub(details.delta.dx, size.width);
-                },
-                onHorizontalDragEnd: (_) => _endScrub(),
-                onHorizontalDragCancel: _endScrub,
+                onLongPressCancel: _isMobilePlatform && !locked
+                    ? _stopHoldSpeed
+                    : null,
+                onHorizontalDragStart: locked ? null : (_) => _startScrub(),
+                onHorizontalDragUpdate: locked
+                    ? null
+                    : (DragUpdateDetails details) {
+                        final Size size = MediaQuery.sizeOf(context);
+                        _updateScrub(details.delta.dx, size.width);
+                      },
+                onHorizontalDragEnd: locked ? null : (_) => _endScrub(),
+                onHorizontalDragCancel: locked ? null : _endScrub,
                 // 移动端竖屏：上下滑跟手切集；全屏/桌面仍走原有手势。
                 // 不在这些平台注册竖向识别器，避免抢走长按 2x。
                 onVerticalDragStart: compactControls
@@ -1846,6 +1904,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   onPointerUp: (PointerUpEvent event) {
                     final Offset? start = _pointerStart;
                     _pointerStart = null;
+                    if (_controlsLocked) {
+                      return; // 锁定态禁用滑动切集。
+                    }
                     if (_isMobilePlatform && !isWide) {
                       return; // 竖向切集交给跟手动画
                     }
@@ -1996,6 +2057,23 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                                       onToggleFullscreen: _toggleFullscreen,
                                     ),
                                   ),
+                                  // 锁定入口：仅移动端横屏显示；放在左上
+                                  // 顶栏（返回键/标题）下方避免重叠。
+                                  if (_lockAvailable)
+                                    Align(
+                                      alignment: Alignment.topLeft,
+                                      child: Padding(
+                                        padding: const EdgeInsets.only(
+                                          left: 8,
+                                          top: 52,
+                                        ),
+                                        child: _GlassSquareButton(
+                                          icon: Icons.lock_open_rounded,
+                                          tooltip: '锁定控制层',
+                                          onPressed: _toggleLock,
+                                        ),
+                                      ),
+                                    ),
                                   Align(
                                     alignment: Alignment.bottomCenter,
                                     child: Column(
@@ -2155,6 +2233,22 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                           child: Padding(
                             padding: const EdgeInsets.only(top: 104),
                             child: _SeekIndicator(data: _seekIndicatorData()),
+                          ),
+                        ),
+                      // 锁定角标：常驻（不受控制层隐藏影响），点按解锁。
+                      // 与控制层无关地放在最上层，保证锁定态唯一可点目标。
+                      if (_controlsLocked)
+                        Align(
+                          alignment: Alignment.topLeft,
+                          child: SafeArea(
+                            child: Padding(
+                              padding: const EdgeInsets.only(left: 8, top: 52),
+                              child: _GlassSquareButton(
+                                icon: Icons.lock_rounded,
+                                tooltip: '解除锁定',
+                                onPressed: _toggleLock,
+                              ),
+                            ),
                           ),
                         ),
                       if (_scrubbing)
