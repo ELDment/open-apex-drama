@@ -2084,12 +2084,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                                                 // Player 未就绪时底部不再兜底。
                                                 if (!compactControls)
                                                   _GlassSquareButton(
-                                                    icon: isWide
+                                                    icon: _fullscreenIndicator
                                                         ? Icons
                                                               .fullscreen_exit_rounded
                                                         : Icons
                                                               .fullscreen_rounded,
-                                                    tooltip: isWide
+                                                    tooltip:
+                                                        _fullscreenIndicator
                                                         ? '退出全屏'
                                                         : '全屏',
                                                     onPressed:
