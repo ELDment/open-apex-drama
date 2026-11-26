@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:apexduanju/services/update_downloader.dart';
@@ -57,6 +58,64 @@ void main() {
       badUrl,
       directory: tempDir,
       urls: <String>[badUrl],
+    );
+    expect(path, isNull);
+    expect(tempDir.listSync(), isEmpty);
+  });
+
+  test('多路并发：先下完的候选胜出，不等慢的那路', () async {
+    final HttpServer slow = await HttpServer.bind(
+      InternetAddress.loopbackIPv4,
+      0,
+    );
+    final HttpServer fast = await HttpServer.bind(
+      InternetAddress.loopbackIPv4,
+      0,
+    );
+    slow.listen((HttpRequest request) async {
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      request.response
+        ..statusCode = HttpStatus.ok
+        ..add('slow-mirror'.codeUnits);
+      await request.response.close();
+    });
+    fast.listen((HttpRequest request) {
+      request.response
+        ..statusCode = HttpStatus.ok
+        ..add('fast-mirror'.codeUnits);
+      unawaited(request.response.close());
+    });
+    addTearDown(() async {
+      slow.close(force: true);
+      fast.close(force: true);
+    });
+
+    final String? path = await UpdateDownloader.download(
+      assetUrl,
+      directory: tempDir,
+      urls: <String>[
+        'http://127.0.0.1:${slow.port}/pkg',
+        'http://127.0.0.1:${fast.port}/pkg',
+      ],
+    );
+    expect(path, isNotNull);
+    expect(File(path!).readAsStringSync(), 'fast-mirror');
+    // 落选流清理完成后不残留任何 .part
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    expect(
+      tempDir.listSync().where((FileSystemEntity e) => e.path.endsWith('.part')),
+      isEmpty,
+    );
+  });
+
+  test('多路全部失败返回 null 且不留文件', () async {
+    final String? path = await UpdateDownloader.download(
+      assetUrl,
+      directory: tempDir,
+      urls: <String>[
+        'http://127.0.0.1:1/a.apk',
+        'http://127.0.0.1:1/b.apk',
+      ],
     );
     expect(path, isNull);
     expect(tempDir.listSync(), isEmpty);

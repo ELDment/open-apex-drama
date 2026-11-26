@@ -8,9 +8,10 @@ import 'update_mirrors.dart';
 
 /// 应用内下载更新包。
 ///
-/// 启动后 [UpdateMirrorProbe] 会在后台测速三个镜像；下载时按测速结果
-/// 从快到慢逐个尝试，全部失败回退官方直链；仍失败则返回 null，由调用方
-/// 降级为打开网页下载。
+/// 启动后 [UpdateMirrorProbe] 会在后台测速三个镜像；下载时所有候选地址
+/// （镜像 + 官方直链）同时发起，谁先下完用谁，其余立即取消。安装包只有
+/// 二十兆左右，瓶颈在中转站带宽而非用户带宽，并发比逐个重试快得多。
+/// 全部失败返回 null，由调用方降级为打开网页下载。
 ///
 /// 镜像格式见 [UpdateMirrors]。
 class UpdateDownloader {
@@ -23,9 +24,9 @@ class UpdateDownloader {
 
   /// 流式下载到临时目录，成功返回文件完整路径。
   ///
-  /// [onProgress] 参数 0.0~1.0（服务端未返回长度时上报 -1 表示不确定）。
-  /// 单个候选连接超时 15s、整体无进度判定超时 30s；任一候选失败自动换
-  /// 下一个（含中转站返回 4xx/5xx 的情况）。
+  /// [onProgress] 参数 0.0~1.0（服务端未返回长度时上报 -1 表示不确定），
+  /// 取所有并发流里最快的那个。单个候选连接超时 15s、整体无进度判定
+  /// 超时 30s；全部候选失败才返回 null。
   static Future<String?> download(
     String assetUrl, {
     String? fileName,
@@ -54,30 +55,66 @@ class UpdateDownloader {
 
     final List<String>? order =
         urls == null ? await UpdateMirrorProbe.preferredOrder() : null;
-    for (final String url in urls ?? candidateUrls(assetUrl, order: order)) {
-      final String? result = await _tryDownload(
-        url,
-        savePath,
-        onProgress,
-        client,
-      );
-      if (result != null) {
-        return result;
-      }
-    }
-    return null;
+    final List<String> candidates =
+        urls ?? candidateUrls(assetUrl, order: order);
+    return _raceDownload(candidates, savePath, onProgress, client);
   }
 
-  static Future<String?> _tryDownload(
-    String url,
+  /// 所有候选并发下载，首个完成者胜出并落为正式文件，其余流作废。
+  static Future<String?> _raceDownload(
+    List<String> urls,
     String savePath,
     void Function(double progress)? onProgress,
     HttpClient? externalClient,
   ) async {
     final HttpClient client = externalClient ?? HttpClient();
-    final String partPath = '$savePath.part';
+    client.connectionTimeout = const Duration(seconds: 15);
     try {
-      client.connectionTimeout = const Duration(seconds: 15);
+      final Completer<String?> winner = Completer<String?>();
+      final _RaceState state = _RaceState(urls.length);
+      for (int i = 0; i < urls.length; i++) {
+        unawaited(
+          _tryDownload(
+            urls[i],
+            savePath,
+            '$savePath.$i.part',
+            client,
+            onProgress: (double value) {
+              final double? report = state.report(value);
+              if (report != null) {
+                onProgress?.call(report);
+              }
+            },
+            isCancelled: () => winner.isCompleted,
+          ).then((String? path) {
+            if (path != null) {
+              if (!winner.isCompleted) {
+                winner.complete(path);
+              }
+            } else if (state.allSettled() && !winner.isCompleted) {
+              winner.complete(null);
+            }
+          }),
+        );
+      }
+      return await winner.future;
+    } finally {
+      // force 关闭会掐断落选流还在传输的连接。
+      if (externalClient == null) {
+        client.close(force: true);
+      }
+    }
+  }
+
+  static Future<String?> _tryDownload(
+    String url,
+    String savePath,
+    String partPath,
+    HttpClient client, {
+    required void Function(double progress) onProgress,
+    required bool Function() isCancelled,
+  }) async {
+    try {
       final HttpClientRequest request = await client.getUrl(Uri.parse(url));
       request.headers.set(HttpHeaders.userAgentHeader, 'ApexDrama-App');
       request.followRedirects = true;
@@ -106,9 +143,16 @@ class UpdateDownloader {
         late StreamSubscription<List<int>> sub;
         sub = response.listen(
           (List<int> chunk) {
+            if (isCancelled()) {
+              sub.cancel();
+              if (!done.isCompleted) {
+                done.complete();
+              }
+              return;
+            }
             received += chunk.length;
             sink.add(chunk);
-            onProgress?.call(
+            onProgress(
               total == null ? -1 : (received / total).clamp(0.0, 1.0),
             );
           },
@@ -128,6 +172,11 @@ class UpdateDownloader {
         await sub.cancel();
         await sink.flush();
         await sink.close();
+        // 已有别的候选先下完：丢弃自己的半截文件，不覆盖胜出的正式文件。
+        if (isCancelled()) {
+          await _deletePart(partPath);
+          return null;
+        }
         // 完整收完才改名为正式文件，避免下次误复用半截包。
         final File target = File(savePath);
         if (await target.exists()) {
@@ -137,20 +186,40 @@ class UpdateDownloader {
         return savePath;
       } catch (_) {
         await sink.close().catchError((Object _) => sink);
-        final File partial = File(partPath);
-        if (await partial.exists()) {
-          await partial.delete().catchError((Object _) => partial);
-        }
+        await _deletePart(partPath);
         return null;
       } finally {
         stall?.cancel();
       }
     } catch (_) {
       return null;
-    } finally {
-      if (externalClient == null) {
-        client.close(force: true);
-      }
     }
   }
+
+  static Future<void> _deletePart(String partPath) async {
+    final File partial = File(partPath);
+    if (await partial.exists()) {
+      await partial.delete().catchError((Object _) => partial);
+    }
+  }
+}
+
+/// 并发下载的共享状态：进度只上报最快的流，并统计是否全部失败。
+class _RaceState {
+  _RaceState(this._total);
+
+  final int _total;
+  double _best = 0;
+  int _settled = 0;
+
+  /// 进度比当前最快的高才上报；-1（长度未知）只在尚无已知进度时上报。
+  double? report(double value) {
+    if (value < 0 ? _best > 0 : value <= _best) {
+      return null;
+    }
+    _best = value < 0 ? 0 : value;
+    return value;
+  }
+
+  bool allSettled() => ++_settled >= _total;
 }
