@@ -23,6 +23,7 @@ import '../models/series_detail.dart';
 import '../player/player_environment.dart';
 import '../player/sleep_timer.dart';
 import '../player/video_output.dart';
+import '../services/drama_share.dart';
 import '../providers/data_providers.dart';
 import '../providers/watch_providers.dart';
 import '../theme/app_colors.dart';
@@ -2120,7 +2121,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   Widget _buildActionRail({required bool compact}) {
     final Widget rail = _ActionRail(
       onFavorite: _toggleFavorite,
-      onShare: () {},
+      onShare: () {
+        // 分享面板关闭后重新计时，保证控制层不会被面板挡着时超时隐藏。
+        DramaShare.share(context, _activeDrama.title).then((_) {
+          if (mounted) {
+            _scheduleControlsHide();
+          }
+        });
+      },
       favorited: ref.watch(isFavoriteProvider(_seriesId)),
       compact: compact,
       speedLabel: _speedLabel,
