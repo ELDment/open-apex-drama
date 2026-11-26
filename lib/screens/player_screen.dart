@@ -427,6 +427,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   /// 播放状态流回调：维护 [_playing] 并驱动控制层自动隐藏。
   void _onPlayingChanged(bool playing) {
+    final bool wasPlaying = _playing;
     _playing = playing;
     if (playing) {
       _scheduleControlsHide();
@@ -436,6 +437,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (mounted && !_controlsVisible) {
         setState(() => _controlsVisible = true);
       }
+    }
+    // 播放/暂停切换必须重建：中央暂停浮标的透明度读的是 [_playing]，
+    // 上面两个分支都可能不触发 setState——不重建会出现「恢复播放后
+    // 图标还挂着，要等控制层自动隐藏那次重建才消失」，暂停时也可能
+    // 不出现图标。状态切换频率低（非每帧），重建开销可忽略。
+    if (mounted && wasPlaying != playing) {
+      setState(() {});
     }
   }
 
