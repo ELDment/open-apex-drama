@@ -35,6 +35,9 @@ class Win32Window {
   // as appropriate for the default monitor. The window is invisible until
   // |Show| is called. Returns true if the window was created successfully.
   bool Create(const std::wstring& title, const Point& origin, const Size& size);
+  // Creates a hidden window using physical screen coordinates.
+  bool Create(const std::wstring& title, const RECT& bounds, DWORD style,
+              DWORD ex_style);
 
   // Show the current window. Returns true if the window was successfully shown.
   bool Show();
@@ -43,7 +46,8 @@ class Win32Window {
   void Destroy();
 
   // Inserts |content| into the window tree.
-  void SetChildContent(HWND content);
+  bool SetChildContent(HWND content);
+  bool TransferChildContent(Win32Window& destination);
 
   // Returns the backing Window handle to enable clients to set icon and other
   // window properties. Returns nullptr if the window has been destroyed.

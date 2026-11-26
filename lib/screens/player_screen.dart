@@ -191,6 +191,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   bool _controlsVisible = true;
   bool _muted = false;
   bool _isFullscreen = false;
+  static const MethodChannel _miniPlayerChannel =
+      MethodChannel('apexduanju/mini_player');
+  bool _miniPlayer = false;
+  double? _miniSeekPreview;
+  bool _windowBusy = false;
   double _volume = 1.0;
   Offset? _pointerStart;
   String? _error;
@@ -343,7 +348,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
         : _controlsAutoHideDelay;
     _controlsHideTimer = Timer(delay, () {
       // 暂停中不自动隐藏；正在拖动进度也不隐藏。
-      if (mounted && _playing && !_scrubbing && _controlsVisible) {
+      if (mounted && _playing && !_scrubbing &&
+          _miniSeekPreview == null && _controlsVisible) {
         setState(() => _controlsVisible = false);
       }
     });
@@ -499,6 +505,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   @override
   void dispose() {
+    if (_miniPlayer) {
+      unawaited(_miniPlayerChannel.invokeMethod<void>('exit').catchError(
+        (Object error) => debugPrint('mini player restore error: $error'),
+      ));
+    }
     // 全屏态退出时最先恢复窗口/系统形态——必须放在最前且独立保护，
     // 后续进度落盘/播放器销毁若抛错，不能跳过恢复（否则退出播放页后
     // 桌面残留全屏窗口、移动端残留横屏）。
@@ -565,25 +576,36 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _videoParamsSub = player.stream.videoParams.listen(_videoSizeFromParams);
   }
 
-  /// 更新视频显示尺寸：优先用 display 宽高（已含旋转），否则用原始宽高
-  /// 并按旋转角度交换，避免竖拍视频被当成横屏而算错弹幕区域。
+  /// 优先取 display 宽高，再按旋转角度换算为画面实际显示的方向。
   void _videoSizeFromParams(VideoParams params, {bool notify = true}) {
     int width = params.dw ?? 0;
     int height = params.dh ?? 0;
     if (width <= 0 || height <= 0) {
       width = params.w ?? 0;
       height = params.h ?? 0;
-      if ((params.rotate ?? 0) % 180 != 0) {
-        final int swap = width;
-        width = height;
-        height = swap;
-      }
     }
-    if (!mounted || width <= 0 || height <= 0) {
+    if ((params.rotate ?? 0) % 180 != 0) {
+      final int swap = width;
+      width = height;
+      height = swap;
+    }
+    // 换流时 media_kit 会先发空尺寸，避免沿用上一集的方向。
+    if (!mounted || (width == _videoWidth && height == _videoHeight)) {
       return;
     }
-    if (width == _videoWidth && height == _videoHeight) {
-      return;
+    if (_miniPlayer &&
+        width > 0 &&
+        height > 0 &&
+        (_videoWidth <= 0 ||
+            _videoHeight <= 0 ||
+            (height > width) != (_videoHeight > _videoWidth))) {
+      unawaited(
+        _miniPlayerChannel
+            .invokeMethod<void>('setOrientation', height > width)
+            .catchError((Object error) {
+              debugPrint('mini player resize error: $error');
+            }),
+      );
     }
     if (notify) {
       setState(() {
@@ -655,6 +677,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     setState(() {
       _loading = true;
       _error = null;
+      _miniSeekPreview = null;
     });
     try {
       final PlaybackRepository repo = ref.read(playbackRepositoryProvider);
@@ -1161,6 +1184,31 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// 模拟 Windows；真实 Windows 桌面上二者一致。
   bool get _isWindowsPlatform => defaultTargetPlatform == TargetPlatform.windows;
 
+  Future<void> _toggleMiniPlayer() async {
+    if (_windowBusy) return;
+    _windowBusy = true;
+    final bool entering = !_miniPlayer;
+    try {
+      // 先收起完整控制栏，避免缩窗时短暂溢出；恢复时等窗口放大再显示。
+      if (entering) setState(() => _miniPlayer = true);
+      await _miniPlayerChannel.invokeMethod<void>(
+        entering ? 'enter' : 'exit',
+        entering ? _videoHeight > _videoWidth : null,
+      );
+      if (!entering && mounted) {
+        setState(() {
+          _miniPlayer = false;
+          _miniSeekPreview = null;
+        });
+      }
+    } catch (error) {
+      if (entering && mounted) setState(() => _miniPlayer = false);
+      debugPrint('mini player error: $error');
+    } finally {
+      _windowBusy = false;
+    }
+  }
+
   /// Windows 全屏形态切换：先藏系统标题栏再进窗口全屏；退出时先出全屏
   /// 再恢复标题栏（finally 保证必恢复，避免残留在无标题栏的中间态）。
   Future<void> _applyWindowsFullscreen(bool fullscreen) async {
@@ -1197,9 +1245,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// 全屏切换：桌面（Windows）用无标题栏的窗口全屏（不转方向、
   /// 不动系统栏）；移动端维持原「强制横屏 + 沉浸式系统栏」。
   Future<void> _toggleFullscreen() async {
+    if (_miniPlayer || _windowBusy) return;
     final bool fullscreen = !_isFullscreen;
     setState(() => _isFullscreen = fullscreen);
     if (_isWindowsPlatform) {
+      _windowBusy = true;
       try {
         await _applyWindowsFullscreen(fullscreen);
       } catch (error) {
@@ -1209,7 +1259,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           setState(() => _isFullscreen = !fullscreen);
         }
         return;
+      } finally {
+        _windowBusy = false;
       }
+      if (!mounted) return;
       if (fullscreen) {
         _scheduleControlsHide();
       } else {
@@ -1472,7 +1525,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       const SingleActivator(LogicalKeyboardKey.keyF): _toggleFullscreen,
       // Esc：全屏中退出全屏（桌面惯例）；非全屏时不抢按键。
       const SingleActivator(LogicalKeyboardKey.escape): () {
-        if (_isFullscreen) {
+        if (_miniPlayer) {
+          _toggleMiniPlayer();
+        } else if (_isFullscreen) {
           _toggleFullscreen();
         }
       },
@@ -1812,6 +1867,142 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     setState(() {});
   }
 
+  Widget _buildMiniPlayerControls() {
+    final Player? player = _player;
+    const TextStyle timeStyle = TextStyle(
+      color: Colors.white,
+      fontSize: 11,
+      fontFeatures: <FontFeature>[FontFeature.tabularFigures()],
+    );
+    return Stack(
+      children: <Widget>[
+        const Positioned.fill(
+          child: IgnorePointer(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: <Color>[
+                    Colors.black38,
+                    Colors.transparent,
+                    Colors.black87,
+                  ],
+                  stops: <double>[0, 0.5, 1],
+                ),
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          top: 2,
+          right: 4,
+          child: _GlassSquareButton(
+            icon: Icons.open_in_full_rounded,
+            tooltip: '返回播放窗口',
+            onPressed: _toggleMiniPlayer,
+          ),
+        ),
+        if (player != null && !_loading && _error == null) ...<Widget>[
+          Center(
+            child: DecoratedBox(
+              decoration: const ShapeDecoration(
+                color: Colors.black54,
+                shape: StadiumBorder(),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  _GlassSquareButton(
+                    icon: Icons.replay_10_rounded,
+                    tooltip: '后退 10 秒',
+                    onPressed: () => _seekBy(const Duration(seconds: -10)),
+                  ),
+                  ValueListenableBuilder<bool>(
+                    valueListenable: _danmakuPlaying,
+                    builder: (context, playing, _) => IconButton(
+                      tooltip: playing ? '暂停' : '播放',
+                      icon: Icon(
+                        playing
+                            ? Icons.pause_rounded
+                            : Icons.play_arrow_rounded,
+                      ),
+                      iconSize: 30,
+                      color: Colors.white,
+                      onPressed: _togglePlay,
+                    ),
+                  ),
+                  _GlassSquareButton(
+                    icon: Icons.forward_10_rounded,
+                    tooltip: '前进 10 秒',
+                    onPressed: () => _seekBy(const Duration(seconds: 10)),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Positioned(
+            left: 10,
+            right: 10,
+            bottom: 2,
+            child: StreamBuilder<Duration>(
+              stream: player.stream.duration,
+              initialData: player.state.duration,
+              builder: (context, snapshot) {
+                final Duration total = snapshot.data ?? Duration.zero;
+                return ValueListenableBuilder<Duration>(
+                  valueListenable: _danmakuClock,
+                  builder: (context, position, _) {
+                    final double fraction =
+                        _miniSeekPreview ??
+                        (total.inMilliseconds > 0
+                            ? (position.inMilliseconds / total.inMilliseconds)
+                                  .clamp(0.0, 1.0)
+                            : 0.0);
+                    return Row(
+                      children: <Widget>[
+                        Text(
+                          _formatDuration(total * fraction),
+                          style: timeStyle,
+                        ),
+                        Expanded(
+                          child: Slider(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 14,
+                            ),
+                            activeColor: AppTokens.immersiveAccent,
+                            inactiveColor: Colors.white38,
+                            thumbColor: Colors.white,
+                            value: fraction,
+                            semanticFormatterCallback: (value) =>
+                                _formatDuration(total * value),
+                            onChangeStart: (value) =>
+                                setState(() => _miniSeekPreview = value),
+                            onChanged: total > Duration.zero
+                                ? (value) =>
+                                      setState(() => _miniSeekPreview = value)
+                                : null,
+                            onChangeEnd: (value) {
+                              _seekToFraction(value);
+                              setState(() => _miniSeekPreview = null);
+                              _scheduleControlsHide();
+                            },
+                          ),
+                        ),
+                        Text(_formatDuration(total), style: timeStyle),
+                      ],
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
   /// 收藏 / 分享操作栏（竖屏与横屏全屏共用一份）。
   /// 收藏与详情页 / 追剧页共用同一 store，状态天然联动。
   /// 手机端将高频的倍速 / 选集移到右侧，并隐藏分享；
@@ -1912,6 +2103,22 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     // 移动端竖屏：底部只留进度 + 全屏，传输按钮交给点按/滑动。
     final bool compactControls = !isWide && _isMobilePlatform;
     final double screenHeight = MediaQuery.sizeOf(context).height;
+    final bool canEnterMiniPlayer =
+        _isWindowsPlatform &&
+        !_loading &&
+        _error == null &&
+        _videoWidth > 0 &&
+        _videoHeight > 0;
+    final Widget? miniPlayerButton = canEnterMiniPlayer
+        ? _GlassSquareButton(
+            icon: Icons.picture_in_picture_alt_rounded,
+            tooltip: '打开小窗',
+            onPressed: _toggleMiniPlayer,
+          )
+        : null;
+    final Widget? miniPlayerControls = _miniPlayer ? _buildMiniPlayerControls() : null;
+    final bool showControls =
+        _controlsVisible || (_miniPlayer && (_loading || _error != null));
 
     return CallbackShortcuts(
       bindings: _shortcutBindings,
@@ -1966,13 +2173,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                     ? (_) => _stopHoldSpeed()
                     : null,
                 onLongPressCancel: _isMobilePlatform ? _stopHoldSpeed : null,
-                onHorizontalDragStart: (_) => _startScrub(),
-                onHorizontalDragUpdate: (DragUpdateDetails details) {
-                  final Size size = MediaQuery.sizeOf(context);
-                  _updateScrub(details.delta.dx, size.width);
-                },
-                onHorizontalDragEnd: (_) => _endScrub(),
-                onHorizontalDragCancel: _endScrub,
+                onHorizontalDragStart: _miniPlayer
+                    ? null
+                    : (_) => _startScrub(),
+                onHorizontalDragUpdate: _miniPlayer
+                    ? null
+                    : (DragUpdateDetails details) {
+                        final Size size = MediaQuery.sizeOf(context);
+                        _updateScrub(details.delta.dx, size.width);
+                      },
+                onHorizontalDragEnd: _miniPlayer ? null : (_) => _endScrub(),
+                onHorizontalDragCancel: _miniPlayer ? null : _endScrub,
                 // 移动端竖屏：上下滑跟手切集；全屏/桌面仍走原有手势。
                 // 不在这些平台注册竖向识别器，避免抢走长按 2x。
                 onVerticalDragStart: compactControls
@@ -2003,7 +2214,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   onPointerUp: (PointerUpEvent event) {
                     final Offset? start = _pointerStart;
                     _pointerStart = null;
-                    if (_isMobilePlatform && !isWide) {
+                    if (_miniPlayer || (_isMobilePlatform && !isWide)) {
                       return; // 竖向切集交给跟手动画
                     }
                     if (start == null) {
@@ -2113,15 +2324,22 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                             ),
                           ),
                         ),
+                      if (_miniPlayer)
+                        Positioned.fill(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onPanStart: (_) => _miniPlayerChannel.invokeMethod<void>('drag'),
+                          ),
+                        ),
                       if (_loading) const _CenteredStatus(loading: true),
                       if (_error != null)
                         _CenteredStatus(message: _error!, onRetry: _boot),
                       AnimatedOpacity(
-                        opacity: _controlsVisible ? 1 : 0,
+                        opacity: showControls ? 1 : 0,
                         duration: const Duration(milliseconds: 160),
                         child: IgnorePointer(
-                          ignoring: !_controlsVisible,
-                          child: DecoratedBox(
+                          ignoring: !showControls,
+                          child: miniPlayerControls ?? DecoratedBox(
                             decoration: const BoxDecoration(
                               gradient: LinearGradient(
                                 begin: Alignment.topCenter,
@@ -2187,6 +2405,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                                               onSpeed: _showSpeedSheet,
                                               onShowQuality: _showQualitySheet,
                                               onOpenEpisodes: _showEpisodes,
+                                              miniPlayerButton: miniPlayerButton,
                                               isFullscreen:
                                                   _fullscreenIndicator,
                                               onToggleFullscreen:
@@ -2325,7 +2544,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                       // 操作栏：竖屏右侧垂直居中（手机端只放倍速 / 选集 /
                       // 收藏，不再贴着进度条，避免下方控制行拥挤）；
                       // 横屏（全屏 / 物理旋转）同样右侧垂直居中。
-                      if (_controlsVisible)
+                      if (_controlsVisible && !_miniPlayer)
                         isWide
                             ? Positioned(
                                 right: 10,
@@ -2667,6 +2886,7 @@ class _PlaybackProgress extends StatelessWidget {
     required this.onSpeed,
     required this.onShowQuality,
     required this.onOpenEpisodes,
+    this.miniPlayerButton,
     required this.isFullscreen,
     required this.onToggleFullscreen,
     this.compact = false,
@@ -2685,6 +2905,7 @@ class _PlaybackProgress extends StatelessWidget {
   final VoidCallback onSpeed;
   final VoidCallback onShowQuality;
   final VoidCallback onOpenEpisodes;
+  final Widget? miniPlayerButton;
   final bool isFullscreen;
   final VoidCallback onToggleFullscreen;
   final bool compact;
@@ -2802,28 +3023,32 @@ class _PlaybackProgress extends StatelessWidget {
                             tooltip: muted ? '取消静音' : '静音',
                             onPressed: onToggleMute,
                           ),
-                          SizedBox(
-                            width: 90,
-                            child: SliderTheme(
-                              data: SliderThemeData(
-                                trackHeight: 3,
-                                overlayShape: SliderComponentShape.noOverlay,
-                                thumbShape: const RoundSliderThumbShape(
-                                  enabledThumbRadius: 5,
+                          Expanded(
+                            child: Align(
+                              alignment: Alignment.centerLeft,
+                              child: SizedBox(
+                                width: 90,
+                                child: SliderTheme(
+                                  data: SliderThemeData(
+                                    trackHeight: 3,
+                                    overlayShape: SliderComponentShape.noOverlay,
+                                    thumbShape: const RoundSliderThumbShape(
+                                      enabledThumbRadius: 5,
+                                    ),
+                                    activeTrackColor: AppTokens.immersiveAccent,
+                                    inactiveTrackColor: Colors.white.withValues(
+                                      alpha: 0.24,
+                                    ),
+                                    thumbColor: Colors.white,
+                                  ),
+                                  child: Slider(
+                                    value: (muted ? 0.0 : volume).clamp(0.0, 1.0),
+                                    onChanged: onVolumeChanged,
+                                  ),
                                 ),
-                                activeTrackColor: AppTokens.immersiveAccent,
-                                inactiveTrackColor: Colors.white.withValues(
-                                  alpha: 0.24,
-                                ),
-                                thumbColor: Colors.white,
-                              ),
-                              child: Slider(
-                                value: (muted ? 0.0 : volume).clamp(0.0, 1.0),
-                                onChanged: onVolumeChanged,
                               ),
                             ),
                           ),
-                          const Spacer(),
                           _RailTextAction(
                             label: speedLabel,
                             onTap: onSpeed,
@@ -2838,6 +3063,7 @@ class _PlaybackProgress extends StatelessWidget {
                             tooltip: '选集',
                             onPressed: onOpenEpisodes,
                           ),
+                          ?miniPlayerButton,
                           _GlassSquareButton(
                             icon: isFullscreen
                                 ? Icons.fullscreen_exit_rounded
