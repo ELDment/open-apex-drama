@@ -703,8 +703,15 @@ void main() {
       await pumpScreen(
         tester,
         PlayerScreen(drama: mockHero),
-        size: const Size(800, 1000),
+        // 用真实桌面的横屏窗口：竖屏尺寸下「宽屏布局」与「全屏态」恰好同时
+        // 翻转，图标错用布局标志的 bug 测不出来（Windows 窗口永远是横的）。
+        size: const Size(1280, 720),
       );
+
+      // 未进全屏时按钮必须是「全屏」：图标要跟窗口全屏标志走，
+      // 不能跟横屏布局走。
+      expect(find.byTooltip('全屏'), findsWidgets);
+      expect(find.byTooltip('退出全屏'), findsNothing);
 
       await tester.tap(find.byTooltip('全屏').first);
       await tester.pump();
