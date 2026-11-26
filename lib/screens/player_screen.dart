@@ -294,6 +294,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   Timer? _controlsHideTimer;
   bool _playing = false;
 
+  /// 控制层锁定（防误触）：锁定后所有画面手势与控制层全部禁用，
+  /// 仅锁图标可点解锁。仅移动端横屏提供入口（竖屏与桌面无此态）。
+  bool _controlsLocked = false;
+
   /// 定时关闭：倒计时到点或本集播完时停止播放并退出，见 [_closeForSleepTimer]。
   late final SleepTimer _sleepTimer = SleepTimer(
     now: widget.environment.now,
@@ -329,7 +333,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           defaultTargetPlatform == TargetPlatform.iOS) &&
       MediaQuery.sizeOf(context).shortestSide < 600;
 
+  /// 锁定入口是否可用：仅移动端横屏（全屏请求或物理旋转任一成立）。
+  /// 竖屏信息流没有锁定诉求，桌面无触摸误触问题，均不提供。
+  bool get _lockAvailable =>
+      _isMobilePlatform &&
+      (_isFullscreen ||
+          MediaQuery.orientationOf(context) == Orientation.landscape);
+
   void _onMouseHover(PointerEvent event) {
+    if (_controlsLocked) {
+      return;
+    }
     if (!_controlsVisible) {
       setState(() => _controlsVisible = true);
     }
@@ -361,19 +375,107 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _togglePlay();
   }
 
-  /// 移动端单击画面：控制层隐藏时先唤出（2 秒后再次自动隐藏），
-  /// 已显示时切播放/暂停，与主流短剧一致。
-  void _onMobileTap() {
+  /// 双击判定窗口。比 Flutter 默认的 300ms 略宽：手速稍慢或设备输入
+  /// 有延迟时，300ms 会把一次双击退化成两次单击——横屏表现为控制栏
+  /// 「出又收」（看不出切换），竖屏表现为「播了又停」。
+  static const Duration _doubleTapWindow = Duration(milliseconds: 320);
+  Timer? _pendingTapTimer;
+  DateTime? _lastTapAt;
+  Offset? _lastTapPos;
+
+  /// 统一的画面点击序列：单击延后 [_doubleTapWindow] 执行，期间来了
+  /// 第二次点击就升级为双击。锁定态直接忽略并清掉待定单击。
+  void _handleScreenTapUp(TapUpDetails details) {
+    if (_controlsLocked) {
+      _pendingTapTimer?.cancel();
+      _pendingTapTimer = null;
+      _lastTapAt = null;
+      return;
+    }
+    // 桌面没有双击语义，单击立即生效，不做 320ms 延迟。
+    if (!_isMobilePlatform) {
+      _onDesktopTap();
+      return;
+    }
+    final DateTime now = DateTime.now();
+    final bool isDouble =
+        _pendingTapTimer != null &&
+        _lastTapAt != null &&
+        now.difference(_lastTapAt!) < _doubleTapWindow &&
+        _lastTapPos != null &&
+        (details.localPosition - _lastTapPos!).distance < 96;
+    _pendingTapTimer?.cancel();
+    if (isDouble) {
+      _pendingTapTimer = null;
+      _lastTapAt = null;
+      _lastTapPos = null;
+      _onScreenDoubleTap();
+      return;
+    }
+    _lastTapAt = now;
+    _lastTapPos = details.localPosition;
+    _pendingTapTimer = Timer(_doubleTapWindow, () {
+      _pendingTapTimer = null;
+      _lastTapAt = null;
+      _lastTapPos = null;
+      _onScreenSingleTap();
+    });
+  }
+
+  /// 单击语义：
+  /// - 桌面：切播放状态（控制层靠鼠标移动唤出）；
+  /// - 移动端竖屏（信息流惯例）：一次点击直接切播放/暂停，
+  ///   控制层跟随播放状态显隐，不再「先出栏、第二下才暂停」；
+  /// - 移动端横屏（长视频惯例）：只管唤出/收起控制栏。
+  void _onScreenSingleTap() {
+    if (!mounted || _controlsLocked) {
+      return;
+    }
+    if (!_isMobilePlatform) {
+      _onDesktopTap();
+      return;
+    }
+    if (_isWideLayout) {
+      setState(() => _controlsVisible = !_controlsVisible);
+      if (_controlsVisible) {
+        _scheduleControlsHide();
+      } else {
+        _controlsHideTimer?.cancel();
+      }
+      return;
+    }
     if (!_controlsVisible) {
       setState(() => _controlsVisible = true);
-      _scheduleControlsHide();
-      return;
     }
     _togglePlay();
   }
 
+  /// 双击语义：仅移动端横屏切播放/暂停。竖屏双击留给后续
+  /// 「双击收藏」类交互，这里不切状态，避免与单击互相抵消。
+  void _onScreenDoubleTap() {
+    if (!mounted || _controlsLocked) {
+      return;
+    }
+    if (_isMobilePlatform && _isWideLayout) {
+      _togglePlay();
+    }
+  }
+
+  /// 切换控制层锁定。锁定时立即收起控制层并取消隐藏计时，
+  /// 锁图标以常驻角标形式保留（见 [_buildLockButton]）。
+  void _toggleLock() {
+    setState(() {
+      _controlsLocked = !_controlsLocked;
+      if (_controlsLocked) {
+        _controlsVisible = false;
+        _controlsHideTimer?.cancel();
+      }
+    });
+  }
+
   /// 播放状态流回调：维护 [_playing] 并驱动控制层自动隐藏。
   void _onPlayingChanged(bool playing) {
+    final bool wasPlaying = _playing;
     _playing = playing;
     if (playing) {
       _scheduleControlsHide();
@@ -383,6 +485,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
       if (mounted && !_controlsVisible) {
         setState(() => _controlsVisible = true);
       }
+    }
+    // 播放/暂停切换必须重建：中央暂停浮标的透明度读的是 [_playing]，
+    // 上面两个分支都可能不触发 setState——不重建会出现「恢复播放后
+    // 图标还挂着，要等控制层自动隐藏那次重建才消失」，暂停时也可能
+    // 不出现图标。状态切换频率低（非每帧），重建开销可忽略。
+    if (mounted && wasPlaying != playing) {
+      setState(() {});
     }
   }
 
@@ -505,6 +614,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   @override
   void dispose() {
+    _pendingTapTimer?.cancel();
     if (_miniPlayer) {
       unawaited(_miniPlayerChannel.invokeMethod<void>('exit').catchError(
         (Object error) => debugPrint('mini player restore error: $error'),
@@ -2103,6 +2213,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     // 移动端竖屏：底部只留进度 + 全屏，传输按钮交给点按/滑动。
     final bool compactControls = !isWide && _isMobilePlatform;
     final double screenHeight = MediaQuery.sizeOf(context).height;
+    // 锁定态：除锁角标外全部手势禁用（识别器直接不注册，最干净）。
+    final bool locked = _controlsLocked;
     final bool canEnterMiniPlayer =
         _isWindowsPlatform &&
         !_loading &&
@@ -2136,8 +2248,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
             backgroundColor: AppTokens.playerBackground,
             // 手势方案：
             // - 点击：桌面切播放状态（控制层由鼠标移动唤出，见
-            //   [_onDesktopTap]）；移动端同样切播放状态，控制层隐藏时
-            //   先唤出并在 2 秒后再隐（见 [_onMobileTap]）。
+            //   [_onDesktopTap]）；移动端竖屏一次点击直接切播放/暂停；
+            //   移动端横屏单击只管唤出/收起控制栏、双击切播放（长视频惯例），
+            //   单击/双击统一走 [_handleScreenTapUp] 的自建时序（320ms 窗口）。
+            // - 锁定态（移动端横屏）：以上手势全部不注册，仅锁角标可点。
             // - 上下滑切集用底层 Listener 直接比对指针位移，绕开手势竞技场，
             //   避免被子级滚动/滑块等识别器抢走；
             // - 长按左/右半屏持续快退/快进，左右滑拖动进度（竞技场里按住不动
@@ -2149,12 +2263,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   : MouseCursor.defer,
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: _isMobilePlatform ? _onMobileTap : _onDesktopTap,
+                // 点击统一走自建单击/双击序列（[_handleScreenTapUp]）：
+                // 不注册 onTap/onDoubleTap，避免 Flutter 默认 300ms 双击
+                // 窗口把手速稍慢的双击退化成两次单击。控制层按钮的点击
+                // 会被手势竞技场吃掉，不会误触发画面点击。
+                onTapUp: locked ? null : _handleScreenTapUp,
                 // 长按画面：仅移动端临时 2x，松手恢复原倍速。
                 // 桌面端不挂长按，保持原有鼠标/空格交互不变。
                 // 移动端竖屏：长按中间 1/3 弹播放设置，左右两侧仍是临时 2x。
                 // 全屏保持原行为（任意位置长按 2x）；桌面不挂长按。
-                onLongPressStart: _isMobilePlatform
+                onLongPressStart: _isMobilePlatform && !locked
                     ? (LongPressStartDetails details) {
                         final double width =
                             MediaQuery.sizeOf(context).width;
@@ -2169,21 +2287,27 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                         }
                       }
                     : null,
-                onLongPressEnd: _isMobilePlatform
+                onLongPressEnd: _isMobilePlatform && !locked
                     ? (_) => _stopHoldSpeed()
                     : null,
-                onLongPressCancel: _isMobilePlatform ? _stopHoldSpeed : null,
-                onHorizontalDragStart: _miniPlayer
+                onLongPressCancel: _isMobilePlatform && !locked
+                    ? _stopHoldSpeed
+                    : null,
+                onHorizontalDragStart: locked || _miniPlayer
                     ? null
                     : (_) => _startScrub(),
-                onHorizontalDragUpdate: _miniPlayer
+                onHorizontalDragUpdate: locked || _miniPlayer
                     ? null
                     : (DragUpdateDetails details) {
                         final Size size = MediaQuery.sizeOf(context);
                         _updateScrub(details.delta.dx, size.width);
                       },
-                onHorizontalDragEnd: _miniPlayer ? null : (_) => _endScrub(),
-                onHorizontalDragCancel: _miniPlayer ? null : _endScrub,
+                onHorizontalDragEnd: locked || _miniPlayer
+                    ? null
+                    : (_) => _endScrub(),
+                onHorizontalDragCancel: locked || _miniPlayer
+                    ? null
+                    : _endScrub,
                 // 移动端竖屏：上下滑跟手切集；全屏/桌面仍走原有手势。
                 // 不在这些平台注册竖向识别器，避免抢走长按 2x。
                 onVerticalDragStart: compactControls
@@ -2214,6 +2338,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   onPointerUp: (PointerUpEvent event) {
                     final Offset? start = _pointerStart;
                     _pointerStart = null;
+                    if (_controlsLocked) {
+                      return; // 锁定态禁用滑动切集。
+                    }
                     if (_miniPlayer || (_isMobilePlatform && !isWide)) {
                       return; // 竖向切集交给跟手动画
                     }
@@ -2373,6 +2500,23 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                                       onToggleFullscreen: _toggleFullscreen,
                                     ),
                                   ),
+                                  // 锁定入口：仅移动端横屏显示；放在左上
+                                  // 顶栏（返回键/标题）下方避免重叠。
+                                  if (_lockAvailable)
+                                    Align(
+                                      alignment: Alignment.topLeft,
+                                      child: Padding(
+                                        padding: const EdgeInsets.only(
+                                          left: 8,
+                                          top: 52,
+                                        ),
+                                        child: _GlassSquareButton(
+                                          icon: Icons.lock_open_rounded,
+                                          tooltip: '锁定控制层',
+                                          onPressed: _toggleLock,
+                                        ),
+                                      ),
+                                    ),
                                   Align(
                                     alignment: Alignment.bottomCenter,
                                     child: Column(
@@ -2535,6 +2679,22 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                           child: Padding(
                             padding: const EdgeInsets.only(top: 104),
                             child: _SeekIndicator(data: _seekIndicatorData()),
+                          ),
+                        ),
+                      // 锁定角标：常驻（不受控制层隐藏影响），点按解锁。
+                      // 与控制层无关地放在最上层，保证锁定态唯一可点目标。
+                      if (_controlsLocked)
+                        Align(
+                          alignment: Alignment.topLeft,
+                          child: SafeArea(
+                            child: Padding(
+                              padding: const EdgeInsets.only(left: 8, top: 52),
+                              child: _GlassSquareButton(
+                                icon: Icons.lock_rounded,
+                                tooltip: '解除锁定',
+                                onPressed: _toggleLock,
+                              ),
+                            ),
                           ),
                         ),
                       if (_scrubbing)
