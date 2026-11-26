@@ -10,6 +10,7 @@ import 'app_state/appearance.dart';
 import 'app_state/danmaku_prefs.dart';
 import 'app_state/playback_prefs.dart';
 import 'app_state/profile.dart';
+import 'dev/perf_probe.dart';
 import 'providers/data_providers.dart';
 
 /// 编译期数据源开关：`--dart-define=USE_MOCK=true` 时启动即用 Mock 数据
@@ -38,6 +39,11 @@ Future<void> main() async {
     // 缺失时 ensureInitialized 会抛异常。降级放行让 UI 壳照常启动；播放
     // 内核依赖补齐后此处自然恢复成功，无需改回。Android/iOS 不受影响。
     debugPrint('MediaKit.ensureInitialized skipped: $error');
+  }
+  // 性能探针：只在 --dart-define=PERF_PROBE=true 时接管启动，正常包不受影响。
+  if (kPerfProbeEnabled) {
+    runApp(const PerfProbeHost());
+    return;
   }
   await loadAppearance();
   await loadProfile();

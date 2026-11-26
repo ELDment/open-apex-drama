@@ -123,21 +123,27 @@ Win32Window::~Win32Window() {
 bool Win32Window::Create(const std::wstring& title,
                          const Point& origin,
                          const Size& size) {
-  Destroy();
-
-  const wchar_t* window_class =
-      WindowClassRegistrar::GetInstance()->GetWindowClass();
-
   const POINT target_point = {static_cast<LONG>(origin.x),
                               static_cast<LONG>(origin.y)};
   HMONITOR monitor = MonitorFromPoint(target_point, MONITOR_DEFAULTTONEAREST);
   UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
   double scale_factor = dpi / 96.0;
 
-  HWND window = CreateWindow(
-      window_class, title.c_str(), WS_OVERLAPPEDWINDOW,
-      Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
-      Scale(size.width, scale_factor), Scale(size.height, scale_factor),
+  const int x = Scale(origin.x, scale_factor);
+  const int y = Scale(origin.y, scale_factor);
+  return Create(title, {x, y, x + Scale(size.width, scale_factor),
+                        y + Scale(size.height, scale_factor)},
+                WS_OVERLAPPEDWINDOW, 0);
+}
+
+bool Win32Window::Create(const std::wstring& title, const RECT& bounds,
+                         DWORD style, DWORD ex_style) {
+  Destroy();
+  const wchar_t* window_class =
+      WindowClassRegistrar::GetInstance()->GetWindowClass();
+  HWND window = CreateWindowEx(
+      ex_style, window_class, title.c_str(), style,
+      bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
       nullptr, nullptr, GetModuleHandle(nullptr), this);
 
   if (!window) {
@@ -217,7 +223,7 @@ Win32Window::MessageHandler(HWND hwnd,
     }
 
     case WM_ACTIVATE:
-      if (child_content_ != nullptr) {
+      if (child_content_ != nullptr && LOWORD(wparam) != WA_INACTIVE) {
         SetFocus(child_content_);
       }
       return 0;
@@ -247,15 +253,27 @@ Win32Window* Win32Window::GetThisFromHandle(HWND const window) noexcept {
       GetWindowLongPtr(window, GWLP_USERDATA));
 }
 
-void Win32Window::SetChildContent(HWND content) {
+bool Win32Window::SetChildContent(HWND content) {
+  SetLastError(ERROR_SUCCESS);
+  if (!SetParent(content, window_handle_) && GetLastError() != ERROR_SUCCESS) {
+    return false;
+  }
   child_content_ = content;
-  SetParent(content, window_handle_);
   RECT frame = GetClientArea();
 
   MoveWindow(content, frame.left, frame.top, frame.right - frame.left,
              frame.bottom - frame.top, true);
 
-  SetFocus(child_content_);
+  if (GetActiveWindow() == window_handle_) SetFocus(child_content_);
+  return true;
+}
+
+bool Win32Window::TransferChildContent(Win32Window& destination) {
+  if (!child_content_ || !destination.SetChildContent(child_content_)) {
+    return false;
+  }
+  child_content_ = nullptr;
+  return true;
 }
 
 RECT Win32Window::GetClientArea() {

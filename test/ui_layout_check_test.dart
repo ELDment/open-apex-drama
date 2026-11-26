@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:media_kit/media_kit.dart' as media;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:apexduanju/data/local/watch_store.dart';
@@ -13,6 +14,7 @@ import 'package:apexduanju/models/danmaku_cue.dart';
 import 'package:apexduanju/models/drama.dart';
 import 'package:apexduanju/models/playback.dart';
 import 'package:apexduanju/models/series_detail.dart';
+import 'package:apexduanju/player/player_environment.dart';
 import 'package:apexduanju/providers/data_providers.dart';
 import 'package:apexduanju/screens/category_screen.dart';
 import 'package:apexduanju/screens/downloads_screen.dart';
@@ -702,8 +704,15 @@ void main() {
       await pumpScreen(
         tester,
         PlayerScreen(drama: mockHero),
-        size: const Size(800, 1000),
+        // 用真实桌面的横屏窗口：竖屏尺寸下「宽屏布局」与「全屏态」恰好同时
+        // 翻转，图标错用布局标志的 bug 测不出来（Windows 窗口永远是横的）。
+        size: const Size(1280, 720),
       );
+
+      // 未进全屏时按钮必须是「全屏」：图标要跟窗口全屏标志走，
+      // 不能跟横屏布局走。
+      expect(find.byTooltip('全屏'), findsWidgets);
+      expect(find.byTooltip('退出全屏'), findsNothing);
 
       await tester.tap(find.byTooltip('全屏').first);
       await tester.pump();
@@ -743,6 +752,200 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     }
   });
+
+  testWidgets('Windows mini player restores on Escape, button and disposal', (
+    WidgetTester tester,
+  ) async {
+    const MethodChannel channel = MethodChannel('apexduanju/mini_player');
+    final List<MethodCall> calls = <MethodCall>[];
+    final backend = _MiniPlayerBackend();
+    final TestDefaultBinaryMessenger messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (MethodCall call) async {
+      calls.add(call);
+      if (call.method == 'exit') {
+        await Future<void>.value();
+        tester.view.physicalSize = const Size(800, 600);
+      }
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    await pumpScreen(
+      tester,
+      PlayerScreen(
+        drama: mockHero,
+        environment: PlayerEnvironment(platformPlayerFactory: () => backend),
+      ),
+      size: const Size(800, 600),
+    );
+    final State<StatefulWidget> player = tester.state(find.byType(PlayerScreen));
+    expect(backend.opens, 1);
+    expect(find.byTooltip('打开小窗'), findsNothing);
+
+    backend.setVideoSize(1280, 720, rotate: 90);
+    await tester.pumpAndSettle();
+
+    Future<void> enter(Size size) async {
+      await tester.tap(find.byTooltip('打开小窗'));
+      await tester.pump();
+      tester.view.physicalSize = size;
+      await tester.pump();
+      expect(find.byTooltip('选集'), findsNothing);
+      expect(find.byTooltip('返回播放窗口'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    }
+
+    await enter(const Size(208, 156));
+    expect(calls.single.arguments, isTrue);
+    await tester.dragFrom(const Offset(14, 65), const Offset(40, 10));
+    expect(calls.map((call) => call.method), <String>['enter', 'drag']);
+    backend.setPlaying(true);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 4));
+    expect(find.byTooltip('返回播放窗口').hitTestable(), findsNothing);
+    backend.failOpen = true;
+    await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.byTooltip('后退 10 秒'), findsNothing);
+    expect(find.byTooltip('返回播放窗口').hitTestable(), findsOneWidget);
+    await tester.pumpAndSettle();
+    expect(find.text('播放失败，请重试'), findsOneWidget);
+    expect(find.byTooltip('后退 10 秒'), findsNothing);
+    backend.setPlaying(false);
+    backend.failOpen = false;
+    await tester.tap(find.text('重试'));
+    await tester.pumpAndSettle();
+    expect(backend.opens, 3);
+    expect(find.byTooltip('后退 10 秒'), findsOneWidget);
+    expect(calls.where((call) => call.method == 'setOrientation'), isEmpty);
+    backend.setVideoSize(720, 1280, rotate: 270);
+    await tester.pump();
+    backend.setVideoSize(1920, 1080);
+    await tester.pump();
+    backend.setVideoSize(720, 1280);
+    await tester.pump();
+    expect(
+      calls.where((call) => call.method == 'setOrientation')
+          .map((call) => call.arguments),
+      <bool>[false, true],
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(find.byTooltip('打开小窗'), findsOneWidget);
+    backend.setVideoSize(720, 1280, rotate: 270);
+    await tester.pumpAndSettle();
+    await enter(const Size(216, 384));
+    expect(calls.last.arguments, isFalse);
+    await tester.tap(find.byTooltip('返回播放窗口'));
+    await tester.pump();
+    expect(tester.state(find.byType(PlayerScreen)), same(player));
+    backend.setVideoSize(720, 1280);
+    await tester.pumpAndSettle();
+    await enter(const Size(384, 216));
+    expect(calls.last.arguments, isTrue);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    expect(calls.map((call) => call.method), <String>[
+      'enter', 'drag', 'setOrientation', 'setOrientation', 'exit',
+      'enter', 'exit', 'enter', 'exit',
+    ]);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
+
+  testWidgets('mini player entry is Windows only', (
+    WidgetTester tester,
+  ) async {
+    final backend = _MiniPlayerBackend();
+    await pumpScreen(
+      tester,
+      PlayerScreen(
+        drama: mockHero,
+        environment: PlayerEnvironment(platformPlayerFactory: () => backend),
+      ),
+      size: const Size(390, 844),
+    );
+    // 尺寸已知也不该出现入口：通道只在 Windows 注册。
+    backend.setVideoSize(1280, 720);
+    await tester.pumpAndSettle();
+    // 等下一集预解析的延时任务落地，否则测试结束时会报 pending timer。
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('打开小窗'), findsNothing);
+    expect(tester.takeException(), isNull);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+  testWidgets('mini player entry failure keeps the entry available', (
+    WidgetTester tester,
+  ) async {
+    const MethodChannel channel = MethodChannel('apexduanju/mini_player');
+    final backend = _MiniPlayerBackend();
+    int enterCalls = 0;
+    final TestDefaultBinaryMessenger messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (MethodCall call) async {
+      if (call.method == 'enter') {
+        enterCalls++;
+        throw PlatformException(code: 'window', message: 'enter failed');
+      }
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    await pumpScreen(
+      tester,
+      PlayerScreen(
+        drama: mockHero,
+        environment: PlayerEnvironment(platformPlayerFactory: () => backend),
+      ),
+      size: const Size(800, 600),
+    );
+    backend.setVideoSize(1280, 720);
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('打开小窗'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('打开小窗'));
+    await tester.pumpAndSettle();
+    // 原生拒绝后回滚：仍是主窗口形态，入口还能再点一次。
+    expect(find.byTooltip('打开小窗'), findsOneWidget);
+    expect(find.byTooltip('返回播放窗口'), findsNothing);
+
+    await tester.tap(find.byTooltip('打开小窗'));
+    await tester.pumpAndSettle();
+    expect(enterCalls, 2);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
+
+  testWidgets('mini player progress slider seeks', (
+    WidgetTester tester,
+  ) async {
+    const MethodChannel channel = MethodChannel('apexduanju/mini_player');
+    final backend = _MiniPlayerBackend();
+    final TestDefaultBinaryMessenger messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (MethodCall call) async => null);
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    await pumpScreen(
+      tester,
+      PlayerScreen(
+        drama: mockHero,
+        environment: PlayerEnvironment(platformPlayerFactory: () => backend),
+      ),
+      size: const Size(800, 600),
+    );
+    backend.setVideoSize(1280, 720);
+    backend.setDuration(const Duration(seconds: 100));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('打开小窗'));
+    await tester.pump();
+    tester.view.physicalSize = const Size(384, 216);
+    await tester.pump();
+    expect(find.byType(Slider), findsOneWidget);
+
+    await tester.drag(find.byType(Slider), const Offset(40, 0));
+    await tester.pumpAndSettle();
+    expect(backend.lastSeek, isNotNull);
+    expect(backend.lastSeek!.inSeconds, greaterThan(30));
+    expect(backend.lastSeek!.inSeconds, lessThanOrEqualTo(100));
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   testWidgets('category filter chip tap refreshes the result grid', (
     WidgetTester tester,
@@ -1368,6 +1571,52 @@ const WatchSnapshot _storeFavorite = WatchSnapshot(
 );
 
 void _noop() {}
+
+class _MiniPlayerBackend extends media.PlatformPlayer {
+  _MiniPlayerBackend() : super(configuration: const media.PlayerConfiguration());
+
+  int opens = 0;
+  bool failOpen = false;
+  Duration? lastSeek;
+
+  void setDuration(Duration duration) {
+    state = state.copyWith(duration: duration);
+    durationController.add(duration);
+  }
+
+  @override
+  Future<void> seek(Duration duration) async {
+    lastSeek = duration;
+  }
+
+  void setVideoSize(int width, int height, {int rotate = 0}) {
+    videoParamsController.add(
+      media.VideoParams(dw: width, dh: height, rotate: rotate),
+    );
+  }
+
+  void setPlaying(bool playing) {
+    playingController.add(playing);
+  }
+
+  @override
+  Future<void> open(media.Playable playable, {bool play = true}) async {
+    opens++;
+    videoParamsController.add(const media.VideoParams());
+    if (failOpen) throw StateError('open failed');
+  }
+
+  Future<void> setProperty(String key, String value) async {}
+
+  @override
+  Future<void> setRate(double rate) async {}
+
+  @override
+  Future<void> setVolume(double volume) async {}
+
+  @override
+  Future<void> stop() async {}
+}
 
 void _absorbTab(FollowingTab _) {}
 
