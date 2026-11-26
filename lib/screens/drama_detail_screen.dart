@@ -10,6 +10,7 @@ import '../models/playback.dart';
 import '../models/series_detail.dart';
 import '../providers/data_providers.dart';
 import '../providers/watch_providers.dart';
+import '../services/drama_share.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import '../widgets/app_pill_button.dart';
@@ -451,12 +452,7 @@ class _DetailTopBar extends StatelessWidget {
           ),
           IconButton(
             tooltip: '分享',
-            onPressed: () => openPlaceholder(
-              context,
-              title: '分享',
-              icon: Icons.ios_share_rounded,
-              message: '分享功能将在后续版本开放',
-            ),
+            onPressed: () => DramaShare.share(context, drama.title),
             icon: const Icon(
               Icons.ios_share_rounded,
               size: 20,
