@@ -4,7 +4,7 @@ publish_to: 'none'
 
 # 版本号规则：buildNumber = major*100 + minor*10 + patch（1.4.0 -> 140）
 # 与已发布 Release 的版本保持连续；发版用 tool/bump_version.ps1 自增。
-version: 1.5.7+157
+version: 1.5.8+158
 
 environment:
   sdk: ^3.13.7
