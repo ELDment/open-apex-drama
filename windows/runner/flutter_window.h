@@ -8,6 +8,8 @@
 
 #include "win32_window.h"
 
+class MiniPlayerWindow;
+
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
  public:
@@ -23,14 +25,7 @@ class FlutterWindow : public Win32Window {
                          LPARAM const lparam) noexcept override;
 
  private:
-  bool EnterMiniPlayer(bool portrait);
-  bool ExitMiniPlayer();
-
-  WINDOWPLACEMENT saved_placement_{};
-  LONG_PTR saved_style_ = 0;
-  bool was_topmost_ = false;
-  bool mini_portrait_ = false;
-  SIZE mini_sizes_[2] = {{384, 216}, {216, 384}};
+  std::unique_ptr<MiniPlayerWindow> mini_player_;
 
   // The project to run.
   flutter::DartProject project_;

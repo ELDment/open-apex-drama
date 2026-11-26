@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:media_kit/media_kit.dart' as media;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:apexduanju/data/local/watch_store.dart';
@@ -748,20 +749,34 @@ void main() {
     WidgetTester tester,
   ) async {
     const MethodChannel channel = MethodChannel('apexduanju/mini_player');
-    final List<String> calls = <String>[];
+    final List<MethodCall> calls = <MethodCall>[];
+    final backend = _MiniPlayerBackend();
     final TestDefaultBinaryMessenger messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(channel, (MethodCall call) async {
-      calls.add(call.method);
+      calls.add(call);
+      if (call.method == 'exit') {
+        await Future<void>.value();
+        tester.view.physicalSize = const Size(800, 600);
+      }
       return null;
     });
     addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
     await pumpScreen(
       tester,
-      PlayerScreen(drama: mockHero),
+      PlayerScreen(
+        drama: mockHero,
+        createPlayer: () => media.Player(platformPlayer: backend),
+        createVideoController: (_, {required configuration}) => null,
+      ),
       size: const Size(800, 600),
     );
     final State<StatefulWidget> player = tester.state(find.byType(PlayerScreen));
+    expect(backend.opens, 1);
+    expect(find.byTooltip('打开小窗'), findsNothing);
+
+    backend.setVideoSize(1280, 720, rotate: 90);
+    await tester.pumpAndSettle();
 
     Future<void> enter(Size size) async {
       await tester.tap(find.byTooltip('打开小窗'));
@@ -771,22 +786,63 @@ void main() {
       expect(find.byTooltip('选集'), findsNothing);
       expect(find.byTooltip('返回播放窗口'), findsOneWidget);
       expect(tester.takeException(), isNull);
-      tester.view.physicalSize = const Size(800, 600);
     }
 
     await enter(const Size(208, 156));
+    expect(calls.single.arguments, isTrue);
     await tester.dragFrom(const Offset(14, 65), const Offset(40, 10));
-    expect(calls, <String>['enter', 'drag']);
+    expect(calls.map((call) => call.method), <String>['enter', 'drag']);
+    backend.setPlaying(true);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 4));
+    expect(find.byTooltip('返回播放窗口').hitTestable(), findsNothing);
+    backend.failOpen = true;
+    await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.byTooltip('后退 10 秒'), findsNothing);
+    expect(find.byTooltip('返回播放窗口').hitTestable(), findsOneWidget);
+    await tester.pumpAndSettle();
+    expect(find.text('播放失败，请重试'), findsOneWidget);
+    expect(find.byTooltip('后退 10 秒'), findsNothing);
+    backend.setPlaying(false);
+    backend.failOpen = false;
+    await tester.tap(find.text('重试'));
+    await tester.pumpAndSettle();
+    expect(backend.opens, 3);
+    expect(find.byTooltip('后退 10 秒'), findsOneWidget);
+    expect(calls.where((call) => call.method == 'setOrientation'), isEmpty);
+    backend.setVideoSize(720, 1280, rotate: 270);
+    await tester.pump();
+    backend.setVideoSize(1920, 1080);
+    await tester.pump();
+    backend.setVideoSize(720, 1280);
+    await tester.pump();
+    expect(
+      calls.where((call) => call.method == 'setOrientation')
+          .map((call) => call.arguments),
+      <bool>[false, true],
+    );
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pump();
+    expect(find.byTooltip('打开小窗'), findsOneWidget);
+    backend.setVideoSize(720, 1280, rotate: 270);
+    await tester.pumpAndSettle();
     await enter(const Size(216, 384));
+    expect(calls.last.arguments, isFalse);
     await tester.tap(find.byTooltip('返回播放窗口'));
     await tester.pump();
     expect(tester.state(find.byType(PlayerScreen)), same(player));
+    backend.setVideoSize(720, 1280);
+    await tester.pumpAndSettle();
     await enter(const Size(384, 216));
+    expect(calls.last.arguments, isTrue);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
-    expect(calls, <String>['enter', 'drag', 'exit', 'enter', 'exit', 'enter', 'exit']);
+    expect(calls.map((call) => call.method), <String>[
+      'enter', 'drag', 'setOrientation', 'setOrientation', 'exit',
+      'enter', 'exit', 'enter', 'exit',
+    ]);
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   testWidgets('category filter chip tap refreshes the result grid', (
@@ -1413,6 +1469,41 @@ const WatchSnapshot _storeFavorite = WatchSnapshot(
 );
 
 void _noop() {}
+
+class _MiniPlayerBackend extends media.PlatformPlayer {
+  _MiniPlayerBackend() : super(configuration: const media.PlayerConfiguration());
+
+  int opens = 0;
+  bool failOpen = false;
+
+  void setVideoSize(int width, int height, {int rotate = 0}) {
+    videoParamsController.add(
+      media.VideoParams(dw: width, dh: height, rotate: rotate),
+    );
+  }
+
+  void setPlaying(bool playing) {
+    playingController.add(playing);
+  }
+
+  @override
+  Future<void> open(media.Playable playable, {bool play = true}) async {
+    opens++;
+    videoParamsController.add(const media.VideoParams());
+    if (failOpen) throw StateError('open failed');
+  }
+
+  Future<void> setProperty(String key, String value) async {}
+
+  @override
+  Future<void> setRate(double rate) async {}
+
+  @override
+  Future<void> setVolume(double volume) async {}
+
+  @override
+  Future<void> stop() async {}
+}
 
 void _absorbTab(FollowingTab _) {}
 

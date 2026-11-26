@@ -84,10 +84,21 @@ Future<void> openPlayer(
 /// 支持多档清晰度切换（dispose 重建整条链路，避免 Surface 复用黑屏）
 /// 与倍速调节（切集 / 切清晰度后保持）。
 class PlayerScreen extends ConsumerStatefulWidget {
-  const PlayerScreen({super.key, required this.drama, this.episodeNumber = 1});
+  const PlayerScreen({
+    super.key,
+    required this.drama,
+    this.episodeNumber = 1,
+    this.createPlayer = Player.new,
+    this.createVideoController = VideoController.new,
+  });
 
   final Drama drama;
   final int episodeNumber;
+  final Player Function() createPlayer;
+  final VideoController? Function(
+    Player player, {
+    required VideoControllerConfiguration configuration,
+  }) createVideoController;
 
   @override
   ConsumerState<PlayerScreen> createState() => _PlayerScreenState();
@@ -375,9 +386,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
   /// Player 上直接 open 新流，Surface 复用可能导致 MediaCodec 初始化
   /// 失败黑屏，因此切档走 dispose → 重建 → 重新 open 的完整链路。
   void _buildPlayer() {
-    final Player player = Player();
+    final Player player = widget.createPlayer();
     _player = player;
-    _controller = VideoController(
+    _controller = widget.createVideoController(
       player,
       configuration: videoOutputConfiguration(_outputMode),
     );
@@ -533,25 +544,36 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _videoParamsSub = player.stream.videoParams.listen(_videoSizeFromParams);
   }
 
-  /// 更新视频显示尺寸：优先用 display 宽高（已含旋转），否则用原始宽高
-  /// 并按旋转角度交换，避免竖拍视频被当成横屏而算错弹幕区域。
+  /// 优先取 display 宽高，再按旋转角度换算为画面实际显示的方向。
   void _videoSizeFromParams(VideoParams params, {bool notify = true}) {
     int width = params.dw ?? 0;
     int height = params.dh ?? 0;
     if (width <= 0 || height <= 0) {
       width = params.w ?? 0;
       height = params.h ?? 0;
-      if ((params.rotate ?? 0) % 180 != 0) {
-        final int swap = width;
-        width = height;
-        height = swap;
-      }
     }
-    if (!mounted || width <= 0 || height <= 0) {
+    if ((params.rotate ?? 0) % 180 != 0) {
+      final int swap = width;
+      width = height;
+      height = swap;
+    }
+    // 换流时 media_kit 会先发空尺寸，避免沿用上一集的方向。
+    if (!mounted || (width == _videoWidth && height == _videoHeight)) {
       return;
     }
-    if (width == _videoWidth && height == _videoHeight) {
-      return;
+    if (_miniPlayer &&
+        width > 0 &&
+        height > 0 &&
+        (_videoWidth <= 0 ||
+            _videoHeight <= 0 ||
+            (height > width) != (_videoHeight > _videoWidth))) {
+      unawaited(
+        _miniPlayerChannel
+            .invokeMethod<void>('setOrientation', height > width)
+            .catchError((Object error) {
+              debugPrint('mini player resize error: $error');
+            }),
+      );
     }
     if (notify) {
       setState(() {
@@ -623,6 +645,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     setState(() {
       _loading = true;
       _error = null;
+      _miniSeekPreview = null;
     });
     try {
       final PlaybackRepository repo = ref.read(playbackRepositoryProvider);
@@ -1734,7 +1757,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
             onPressed: _toggleMiniPlayer,
           ),
         ),
-        if (player != null) ...<Widget>[
+        if (player != null && !_loading && _error == null) ...<Widget>[
           Center(
             child: DecoratedBox(
               decoration: const ShapeDecoration(
@@ -1934,7 +1957,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     // 移动端竖屏：底部只留进度 + 全屏，传输按钮交给点按/滑动。
     final bool compactControls = !isWide && _isMobilePlatform;
     final double screenHeight = MediaQuery.sizeOf(context).height;
-    final Widget? miniPlayerButton = _isWindowsPlatform
+    final bool canEnterMiniPlayer =
+        _isWindowsPlatform &&
+        !_loading &&
+        _error == null &&
+        _videoWidth > 0 &&
+        _videoHeight > 0;
+    final Widget? miniPlayerButton = canEnterMiniPlayer
         ? _GlassSquareButton(
             icon: Icons.picture_in_picture_alt_rounded,
             tooltip: '打开小窗',
@@ -1942,6 +1971,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
           )
         : null;
     final Widget? miniPlayerControls = _miniPlayer ? _buildMiniPlayerControls() : null;
+    final bool showControls =
+        _controlsVisible || (_miniPlayer && (_loading || _error != null));
 
     return CallbackShortcuts(
       bindings: _shortcutBindings,
@@ -2158,10 +2189,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                       if (_error != null)
                         _CenteredStatus(message: _error!, onRetry: _boot),
                       AnimatedOpacity(
-                        opacity: _controlsVisible ? 1 : 0,
+                        opacity: showControls ? 1 : 0,
                         duration: const Duration(milliseconds: 160),
                         child: IgnorePointer(
-                          ignoring: !_controlsVisible,
+                          ignoring: !showControls,
                           child: miniPlayerControls ?? DecoratedBox(
                             decoration: const BoxDecoration(
                               gradient: LinearGradient(
@@ -2271,7 +2302,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                                                 ],
                                                 // 移动端竖屏：全屏与倍速在顶栏，
                                                 // Player 未就绪时底部不再兜底。
-                                                ?miniPlayerButton,
                                                 if (!compactControls)
                                                   _GlassSquareButton(
                                                     icon: isWide
