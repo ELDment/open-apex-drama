@@ -327,14 +327,64 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     _togglePlay();
   }
 
-  /// 移动端单击画面：
-  /// - 竖屏（信息流惯例）：控制层隐藏时先唤出（2 秒后自动隐藏），
-  ///   已显示时切播放/暂停；
-  /// - 横屏全屏（长视频惯例）：单击只负责唤出/收起控制栏，
-  ///   播放/暂停交给双击（见 onDoubleTap），降低误触概率。
-  /// 锁定态下画面单击一律忽略。
-  void _onMobileTap() {
+  /// 双击判定窗口。比 Flutter 默认的 300ms 略宽：手速稍慢或设备输入
+  /// 有延迟时，300ms 会把一次双击退化成两次单击——横屏表现为控制栏
+  /// 「出又收」（看不出切换），竖屏表现为「播了又停」。
+  static const Duration _doubleTapWindow = Duration(milliseconds: 320);
+  Timer? _pendingTapTimer;
+  DateTime? _lastTapAt;
+  Offset? _lastTapPos;
+
+  /// 统一的画面点击序列：单击延后 [_doubleTapWindow] 执行，期间来了
+  /// 第二次点击就升级为双击。锁定态直接忽略并清掉待定单击。
+  void _handleScreenTapUp(TapUpDetails details) {
     if (_controlsLocked) {
+      _pendingTapTimer?.cancel();
+      _pendingTapTimer = null;
+      _lastTapAt = null;
+      return;
+    }
+    // 桌面没有双击语义，单击立即生效，不做 320ms 延迟。
+    if (!_isMobilePlatform) {
+      _onDesktopTap();
+      return;
+    }
+    final DateTime now = DateTime.now();
+    final bool isDouble =
+        _pendingTapTimer != null &&
+        _lastTapAt != null &&
+        now.difference(_lastTapAt!) < _doubleTapWindow &&
+        _lastTapPos != null &&
+        (details.localPosition - _lastTapPos!).distance < 96;
+    _pendingTapTimer?.cancel();
+    if (isDouble) {
+      _pendingTapTimer = null;
+      _lastTapAt = null;
+      _lastTapPos = null;
+      _onScreenDoubleTap();
+      return;
+    }
+    _lastTapAt = now;
+    _lastTapPos = details.localPosition;
+    _pendingTapTimer = Timer(_doubleTapWindow, () {
+      _pendingTapTimer = null;
+      _lastTapAt = null;
+      _lastTapPos = null;
+      _onScreenSingleTap();
+    });
+  }
+
+  /// 单击语义：
+  /// - 桌面：切播放状态（控制层靠鼠标移动唤出）；
+  /// - 移动端竖屏（信息流惯例）：一次点击直接切播放/暂停，
+  ///   控制层跟随播放状态显隐，不再「先出栏、第二下才暂停」；
+  /// - 移动端横屏（长视频惯例）：只管唤出/收起控制栏。
+  void _onScreenSingleTap() {
+    if (!mounted || _controlsLocked) {
+      return;
+    }
+    if (!_isMobilePlatform) {
+      _onDesktopTap();
       return;
     }
     if (_isWideLayout) {
@@ -348,10 +398,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     }
     if (!_controlsVisible) {
       setState(() => _controlsVisible = true);
-      _scheduleControlsHide();
-      return;
     }
     _togglePlay();
+  }
+
+  /// 双击语义：仅移动端横屏切播放/暂停。竖屏双击留给后续
+  /// 「双击收藏」类交互，这里不切状态，避免与单击互相抵消。
+  void _onScreenDoubleTap() {
+    if (!mounted || _controlsLocked) {
+      return;
+    }
+    if (_isMobilePlatform && _isWideLayout) {
+      _togglePlay();
+    }
   }
 
   /// 切换控制层锁定。锁定时立即收起控制层并取消隐藏计时，
@@ -499,6 +558,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
 
   @override
   void dispose() {
+    _pendingTapTimer?.cancel();
     // 全屏态退出时最先恢复窗口/系统形态——必须放在最前且独立保护，
     // 后续进度落盘/播放器销毁若抛错，不能跳过恢复（否则退出播放页后
     // 桌面残留全屏窗口、移动端残留横屏）。
@@ -1797,8 +1857,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
     // 移动端竖屏：底部只留进度 + 全屏，传输按钮交给点按/滑动。
     final bool compactControls = !isWide && _isMobilePlatform;
     final double screenHeight = MediaQuery.sizeOf(context).height;
-    // 移动端横屏全屏：双击切播放/暂停（长视频惯例），单击只管控制栏。
-    final bool doubleTapPauses = _isMobilePlatform && isWide;
     // 锁定态：除锁角标外全部手势禁用（识别器直接不注册，最干净）。
     final bool locked = _controlsLocked;
 
@@ -1818,9 +1876,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
             backgroundColor: AppTokens.playerBackground,
             // 手势方案：
             // - 点击：桌面切播放状态（控制层由鼠标移动唤出，见
-            //   [_onDesktopTap]）；移动端竖屏切播放状态，控制层隐藏时
-            //   先唤出并在 2 秒后再隐（见 [_onMobileTap]）；移动端横屏
-            //   单击只管唤出/收起控制栏，双击切播放（长视频惯例）。
+            //   [_onDesktopTap]）；移动端竖屏一次点击直接切播放/暂停；
+            //   移动端横屏单击只管唤出/收起控制栏、双击切播放（长视频惯例），
+            //   单击/双击统一走 [_handleScreenTapUp] 的自建时序（320ms 窗口）。
             // - 锁定态（移动端横屏）：以上手势全部不注册，仅锁角标可点。
             // - 上下滑切集用底层 Listener 直接比对指针位移，绕开手势竞技场，
             //   避免被子级滚动/滑块等识别器抢走；
@@ -1833,13 +1891,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen>
                   : MouseCursor.defer,
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: locked
-                    ? null
-                    : (_isMobilePlatform ? _onMobileTap : _onDesktopTap),
-                // 移动端横屏：双击切播放/暂停；竖屏/桌面不注册，
-                // 保持各自单击语义不变。注意 Flutter 中 onTap 与 onDoubleTap
-                // 并存时单击会延迟约 300ms 等双击判定，横屏可接受。
-                onDoubleTap: doubleTapPauses && !locked ? _togglePlay : null,
+                // 点击统一走自建单击/双击序列（[_handleScreenTapUp]）：
+                // 不注册 onTap/onDoubleTap，避免 Flutter 默认 300ms 双击
+                // 窗口把手速稍慢的双击退化成两次单击。控制层按钮的点击
+                // 会被手势竞技场吃掉，不会误触发画面点击。
+                onTapUp: locked ? null : _handleScreenTapUp,
                 // 长按画面：仅移动端临时 2x，松手恢复原倍速。
                 // 桌面端不挂长按，保持原有鼠标/空格交互不变。
                 // 移动端竖屏：长按中间 1/3 弹播放设置，左右两侧仍是临时 2x。
