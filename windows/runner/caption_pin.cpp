@@ -234,7 +234,8 @@ void UpdateCaptionPin(HWND button) {
   if (above == button) {
     flags |= SWP_NOZORDER;
   } else if (!pinned && above && IsTopmost(above)) {
-    above = HWND_NOTOPMOST;
+    // HWND_NOTOPMOST does not raise a button that is already non-topmost.
+    above = IsTopmost(button) ? HWND_NOTOPMOST : HWND_TOP;
   }
   SetWindowPos(button, above, bounds->left, bounds->top,
                bounds->right - bounds->left, bounds->bottom - bounds->top,
