@@ -2,12 +2,12 @@
 
 第三方短剧客户端，非官方、免登录、免费使用。
 
+<a href="https://trendshift.io/repositories/367301?utm_source=trendshift-badge&utm_medium=badge&utm_campaign=badge-trendshift-367301" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/367301/daily?language=Dart" alt="Sxuan-Coder%2Fopen-apex-drama | Trendshift" width="250" height="55"></a>
+
 [![Android](https://img.shields.io/badge/Android-下载_APK-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/Sxuan-Coder/open-apex-drama/releases/latest)
 [![Windows](https://img.shields.io/badge/Windows-下载-0078D4?style=for-the-badge&logo=windows11&logoColor=white)](https://github.com/Sxuan-Coder/open-apex-drama/releases/latest)
 [![License](https://img.shields.io/badge/License-AGPL_v3-blue?style=for-the-badge)](https://www.gnu.org/licenses/agpl-3.0)
 [![官网](https://img.shields.io/badge/官网-apexdrama.sxapex.com-FF6B9D?style=for-the-badge&logo=googlechrome&logoColor=white)](https://apexdrama.sxapex.com)
-
-*前两个徽标跳转最新版本下载*
 
 ## 截图
 
